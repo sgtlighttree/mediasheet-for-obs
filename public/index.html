@@ -1480,6 +1480,45 @@
       const cfg = MS.connection.getConfig();
       MS.connection.connect(cfg.host || 'localhost', cfg.port || 4455, cfg.password || '');
     })();
+
+    // ===== Server Health Check =====
+    (function serverHealthCheck() {
+      const statusEl = document.getElementById('server-status');
+      const btnAdd = document.getElementById('btn-add-input');
+      let serverUp = true;
+
+      setInterval(async () => {
+        try {
+          const resp = await fetch('/', { method: 'HEAD' });
+          if (!serverUp) {
+            serverUp = true;
+            statusEl.hidden = true;
+            // Re-enable Add Input if OBS is connected
+            if (MS.connection.connected) btnAdd.disabled = false;
+          }
+        } catch {
+          if (serverUp) {
+            serverUp = false;
+            statusEl.hidden = false;
+            btnAdd.disabled = true;
+          }
+        }
+      }, 10000);
+    })();
+
+    // ===== Browser Tab Sleep Recovery =====
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible') return;
+      if (MS.connection.connected) {
+        // Verify connection is still alive, then rebuild
+        MS.connection.obs.call('GetVersion')
+          .then(() => MS.grid.rebuild())
+          .catch(() => {
+            // Connection is stale — disconnect will trigger reconnect loop
+            MS.connection.obs.disconnect();
+          });
+      }
+    });
   </script>
 </body>
 </html>
