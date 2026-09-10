@@ -709,7 +709,34 @@
 
     // Stubs for modules defined in later tasks — prevents runtime errors
     // when testing grid in isolation. Replaced by Tasks 7, 8, 9.
-    MS.transport = { action() {}, seek() {} };
+    // ===== Transport Controls =====
+    MS.transport = (() => {
+      async function action(inputName, mediaAction) {
+        if (!MS.connection.connected || !inputName) return;
+        try {
+          await MS.connection.obs.call('TriggerMediaInputAction', {
+            inputName,
+            mediaAction,
+          });
+        } catch (err) {
+          console.error('Transport action failed:', err);
+        }
+      }
+
+      async function seek(inputName, cursorMs) {
+        if (!MS.connection.connected || !inputName) return;
+        try {
+          await MS.connection.obs.call('SetMediaInputCursor', {
+            inputName,
+            mediaCursor: Math.max(0, cursorMs),
+          });
+        } catch (err) {
+          console.error('Seek failed:', err);
+        }
+      }
+
+      return { action, seek };
+    })();
     MS.audio = { toggleMute() {}, setVolume() {}, loadInitialState() {} };
     MS.transitionControl = { cut() {}, fade() {}, take() {} };
 
