@@ -1,0 +1,23 @@
+{
+  "name": "mediasheet-for-obs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web-based OBS playout control surface",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/**/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sgtlighttree/mediasheet-for-obs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sgtlighttree/mediasheet-for-obs/issues"
+  },
+  "homepage": "https://github.com/sgtlighttree/mediasheet-for-obs#readme",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}
