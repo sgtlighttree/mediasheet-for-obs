@@ -460,7 +460,268 @@
 
   <script src="vendor/obs-websocket-js.min.js"></script>
   <script>
-    // Application code will be added in subsequent tasks
+    const MS = {};
+
+    // ===== Connection Manager =====
+    MS.connection = (() => {
+      const obs = new OBSWebSocket();
+      let connected = false;
+      let reconnectTimer = null;
+      let reconnectDelay = 1000;
+      let heartbeatTimer = null;
+      let heartbeatTimeout = null;
+
+      const MAX_RECONNECT_DELAY = 15000;
+      const HEARTBEAT_INTERVAL = 10000;
+      const HEARTBEAT_TIMEOUT = 5000;
+
+      const dot = document.getElementById('connection-dot');
+      const text = document.getElementById('connection-text');
+
+      function setStatus(state, label) {
+        dot.className = 'status-dot ' + state;
+        text.textContent = label;
+      }
+
+      function getConfig() {
+        try {
+          return JSON.parse(localStorage.getItem('ms_connection')) || {};
+        } catch { return {}; }
+      }
+
+      function saveConfig(host, port, password) {
+        localStorage.setItem('ms_connection', JSON.stringify({ host, port, password }));
+      }
+
+      async function connect(host, port, password) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+
+        host = host || 'localhost';
+        port = port || 4455;
+
+        setStatus('reconnecting', `Connecting to ${host}:${port}...`);
+
+        try {
+          const url = `ws://${host}:${port}`;
+          await obs.connect(url, password || undefined, { rpcVersion: 1 });
+          connected = true;
+          reconnectDelay = 1000;
+          saveConfig(host, port, password);
+          setStatus('connected', `${host}:${port}`);
+          startHeartbeat();
+          if (MS.connection.onConnect) MS.connection.onConnect();
+        } catch (err) {
+          connected = false;
+          if (err.code === 4009) {
+            // Auth required
+            setStatus('disconnected', 'Auth required');
+            MS.configModal.show(true);
+            return;
+          }
+          setStatus('disconnected', `Failed: ${err.message}`);
+          scheduleReconnect(host, port, password);
+        }
+      }
+
+      function scheduleReconnect(host, port, password) {
+        if (reconnectTimer) return;
+        setStatus('reconnecting', `Reconnecting in ${Math.round(reconnectDelay / 1000)}s...`);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connect(host, port, password);
+        }, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+      }
+
+      function startHeartbeat() {
+        stopHeartbeat();
+        heartbeatTimer = setInterval(async () => {
+          try {
+            heartbeatTimeout = setTimeout(() => {
+              console.warn('OBS heartbeat timeout — treating as disconnected');
+              obs.disconnect();
+            }, HEARTBEAT_TIMEOUT);
+            await obs.call('GetVersion');
+            clearTimeout(heartbeatTimeout);
+          } catch {
+            clearTimeout(heartbeatTimeout);
+          }
+        }, HEARTBEAT_INTERVAL);
+      }
+
+      function stopHeartbeat() {
+        clearInterval(heartbeatTimer);
+        clearTimeout(heartbeatTimeout);
+      }
+
+      async function disconnect() {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        stopHeartbeat();
+        connected = false;
+        try { await obs.disconnect(); } catch {}
+        setStatus('disconnected', 'Disconnected');
+        if (MS.connection.onDisconnect) MS.connection.onDisconnect();
+      }
+
+      obs.on('ConnectionClosed', () => {
+        if (!connected) return;
+        connected = false;
+        stopHeartbeat();
+        setStatus('disconnected', 'Connection lost');
+        const cfg = getConfig();
+        scheduleReconnect(cfg.host, cfg.port, cfg.password);
+        if (MS.connection.onDisconnect) MS.connection.onDisconnect();
+      });
+
+      return {
+        obs,
+        get connected() { return connected; },
+        connect,
+        disconnect,
+        getConfig,
+        onConnect: null,
+        onDisconnect: null,
+      };
+    })();
+
+    // ===== Transition Resolver =====
+    MS.transitions = { cutName: null, fadeName: null };
+
+    // ===== Canvas Cache =====
+    MS.canvas = { width: 1920, height: 1080 };
+
+    // ===== Post-connect initialization =====
+    async function onConnected() {
+      const obs = MS.connection.obs;
+
+      // Enable studio mode
+      try {
+        await obs.call('SetStudioModeEnabled', { studioModeEnabled: true });
+      } catch {}
+
+      // Resolve transitions by kind
+      try {
+        const { transitions } = await obs.call('GetSceneTransitionList');
+        for (const t of transitions) {
+          if (t.transitionKind === 'cut_transition' && !MS.transitions.cutName) {
+            MS.transitions.cutName = t.transitionName;
+          }
+          if (t.transitionKind === 'fade_transition' && !MS.transitions.fadeName) {
+            MS.transitions.fadeName = t.transitionName;
+          }
+        }
+        if (!MS.transitions.cutName) {
+          console.warn('No cut transition found — falling back to first available');
+          MS.transitions.cutName = transitions[0]?.transitionName;
+        }
+        if (!MS.transitions.fadeName) {
+          console.warn('No fade transition found — falling back to first available');
+          MS.transitions.fadeName = transitions[0]?.transitionName;
+        }
+      } catch (err) {
+        console.error('Failed to resolve transitions:', err);
+      }
+
+      // Cache canvas dimensions
+      try {
+        const vs = await obs.call('GetVideoSettings');
+        MS.canvas.width = vs.baseWidth;
+        MS.canvas.height = vs.baseHeight;
+      } catch {}
+
+      // Enable UI buttons
+      document.getElementById('btn-add-input').disabled = false;
+      document.getElementById('btn-cut').disabled = false;
+      document.getElementById('btn-fade').disabled = false;
+
+      // Build scene grid (Task 5)
+      if (MS.grid) MS.grid.rebuild();
+    }
+
+    function onDisconnected() {
+      document.getElementById('btn-add-input').disabled = true;
+      document.getElementById('btn-cut').disabled = true;
+      document.getElementById('btn-fade').disabled = true;
+    }
+
+    MS.connection.onConnect = onConnected;
+    MS.connection.onDisconnect = onDisconnected;
+
+    // ===== Config Modal =====
+    MS.configModal = (() => {
+      const overlay = document.getElementById('config-modal');
+      const hostInput = document.getElementById('config-host');
+      const portInput = document.getElementById('config-port');
+      const passInput = document.getElementById('config-password');
+      const btnConnect = document.getElementById('btn-connect');
+      const btnDisconnect = document.getElementById('btn-disconnect');
+      const btnClose = document.getElementById('btn-config-close');
+      const btnToggle = document.getElementById('btn-toggle-password');
+
+      function show(focusPassword) {
+        const cfg = MS.connection.getConfig();
+        hostInput.value = cfg.host || 'localhost';
+        portInput.value = cfg.port || 4455;
+        passInput.value = cfg.password || '';
+        btnConnect.hidden = MS.connection.connected;
+        btnDisconnect.hidden = !MS.connection.connected;
+        overlay.hidden = false;
+        if (focusPassword) {
+          passInput.focus();
+        } else {
+          hostInput.focus();
+        }
+      }
+
+      function hide() {
+        overlay.hidden = true;
+      }
+
+      btnConnect.addEventListener('click', () => {
+        const host = hostInput.value.trim();
+        const port = parseInt(portInput.value, 10);
+        const password = passInput.value;
+        hide();
+        MS.connection.connect(host, port, password);
+      });
+
+      btnDisconnect.addEventListener('click', () => {
+        hide();
+        MS.connection.disconnect();
+      });
+
+      btnClose.addEventListener('click', hide);
+
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) hide();
+      });
+
+      btnToggle.addEventListener('click', () => {
+        passInput.type = passInput.type === 'password' ? 'text' : 'password';
+      });
+
+      document.getElementById('btn-settings').addEventListener('click', () => show());
+
+      return { show, hide };
+    })();
+
+    // ===== Init =====
+    (function init() {
+      // Load fade duration from localStorage
+      const savedDuration = localStorage.getItem('ms_transition_duration');
+      if (savedDuration) {
+        document.getElementById('fade-duration').value = savedDuration;
+      }
+      document.getElementById('fade-duration').addEventListener('change', (e) => {
+        localStorage.setItem('ms_transition_duration', e.target.value);
+      });
+
+      // Auto-connect
+      const cfg = MS.connection.getConfig();
+      MS.connection.connect(cfg.host || 'localhost', cfg.port || 4455, cfg.password || '');
+    })();
   </script>
 </body>
 </html>
