@@ -707,6 +707,431 @@
       return { show, hide };
     })();
 
+    // Stubs for modules defined in later tasks — prevents runtime errors
+    // when testing grid in isolation. Replaced by Tasks 7, 8, 9.
+    MS.transport = { action() {}, seek() {} };
+    MS.audio = { toggleMute() {}, setVolume() {}, loadInitialState() {} };
+    MS.transitionControl = { cut() {}, fade() {}, take() {} };
+
+    // ===== Scene Grid =====
+    MS.grid = (() => {
+      const container = document.getElementById('tile-grid');
+      const pgmLabel = document.getElementById('pgm-name');
+      const pvwLabel = document.getElementById('pvw-name');
+      const lastEventEl = document.getElementById('last-event');
+      const tiles = new Map(); // sceneName → tile object
+      let currentPgm = null;
+      let currentPvw = null;
+      let pollTimers = [];
+
+      function logEvent(msg) {
+        lastEventEl.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+      }
+
+      function isMediaSheet(sceneName) {
+        return sceneName.startsWith('[MS] ');
+      }
+
+      function formatTime(ms) {
+        if (ms == null || ms < 0) return '--:--';
+        const totalSec = Math.floor(ms / 1000);
+        const min = Math.floor(totalSec / 60);
+        const sec = totalSec % 60;
+        return String(min).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+      }
+
+      function createTileElement(sceneName, inputName, isMedia) {
+        const tile = document.createElement('div');
+        tile.className = 'tile';
+        tile.dataset.scene = sceneName;
+
+        // Thumbnail
+        const thumb = document.createElement('div');
+        thumb.className = 'tile-thumbnail';
+        const fallback = document.createElement('span');
+        fallback.className = 'fallback-icon';
+        fallback.textContent = isMedia ? '🎬' : '📷';
+        thumb.appendChild(fallback);
+        tile.appendChild(thumb);
+
+        // Label
+        const label = document.createElement('div');
+        label.className = 'tile-label';
+        label.textContent = isMedia ? sceneName.replace('[MS] ', '') : sceneName;
+        label.title = sceneName;
+        tile.appendChild(label);
+
+        if (isMedia) {
+          // Transport controls
+          const transport = document.createElement('div');
+          transport.className = 'tile-transport';
+          const btns = [
+            { icon: '▶', action: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY', cls: 'play' },
+            { icon: '⏸', action: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE', cls: 'pause' },
+            { icon: '⏹', action: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP', cls: 'stop' },
+            { icon: '⏮', action: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART', cls: 'restart' },
+          ];
+          for (const b of btns) {
+            const btn = document.createElement('button');
+            btn.className = 'btn-transport';
+            btn.dataset.action = b.action;
+            btn.dataset.cls = b.cls;
+            btn.textContent = b.icon;
+            btn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              MS.transport.action(inputName, b.action);
+            });
+            transport.appendChild(btn);
+          }
+          tile.appendChild(transport);
+
+          // Progress bar
+          const progress = document.createElement('div');
+          progress.className = 'tile-progress';
+          const bar = document.createElement('div');
+          bar.className = 'progress-bar';
+          const fill = document.createElement('div');
+          fill.className = 'progress-bar-fill';
+          bar.appendChild(fill);
+          bar.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const rect = bar.getBoundingClientRect();
+            const pct = (e.clientX - rect.left) / rect.width;
+            const tileData = tiles.get(sceneName);
+            if (tileData && tileData.duration > 0) {
+              MS.transport.seek(inputName, Math.round(pct * tileData.duration));
+            }
+          });
+          progress.appendChild(bar);
+          const time = document.createElement('span');
+          time.className = 'progress-time';
+          time.textContent = '--:-- / --:--';
+          progress.appendChild(time);
+          tile.appendChild(progress);
+
+          // Audio controls
+          const audio = document.createElement('div');
+          audio.className = 'tile-audio';
+          const muteBtn = document.createElement('button');
+          muteBtn.className = 'btn-mute';
+          muteBtn.textContent = '🔊';
+          muteBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            MS.audio.toggleMute(inputName);
+          });
+          audio.appendChild(muteBtn);
+          const slider = document.createElement('input');
+          slider.type = 'range';
+          slider.className = 'volume-slider';
+          slider.min = '-60';
+          slider.max = '0';
+          slider.step = '1';
+          slider.value = '0';
+          let debounceTimer = null;
+          slider.addEventListener('input', (e) => {
+            e.stopPropagation();
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+              MS.audio.setVolume(inputName, parseFloat(slider.value));
+            }, 50);
+          });
+          slider.addEventListener('click', (e) => e.stopPropagation());
+          audio.appendChild(slider);
+          tile.appendChild(audio);
+        }
+
+        // Click → PVW
+        tile.addEventListener('click', () => {
+          if (MS.connection.connected) {
+            MS.connection.obs.call('SetCurrentPreviewScene', { sceneName })
+              .catch((err) => console.error('SetCurrentPreviewScene failed:', err));
+          }
+        });
+
+        // Double-click → Take to PGM
+        tile.addEventListener('dblclick', () => {
+          if (MS.connection.connected && MS.transitions) {
+            MS.transitionControl.take(sceneName);
+          }
+        });
+
+        // Right-click → context menu (media tiles only)
+        if (isMedia) {
+          tile.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            MS.contextMenu.show(e.clientX, e.clientY, sceneName);
+          });
+        }
+
+        return tile;
+      }
+
+      async function discoverInputName(sceneName) {
+        try {
+          const { sceneItems } = await MS.connection.obs.call('GetSceneItemList', { sceneName });
+          if (sceneItems.length > 0) {
+            return sceneItems[0].sourceName;
+          }
+        } catch {}
+        return sceneName;
+      }
+
+      async function fetchThumbnail(sceneName, thumbEl) {
+        try {
+          const result = await MS.connection.obs.call('GetSourceScreenshot', {
+            sourceName: sceneName,
+            imageFormat: 'jpg',
+            imageWidth: 320,
+            imageCompressionQuality: 60,
+          });
+          if (result.imageData) {
+            thumbEl.innerHTML = '';
+            const img = document.createElement('img');
+            img.src = result.imageData;
+            thumbEl.appendChild(img);
+          }
+        } catch {
+          // Source may not have rendered yet — keep fallback icon
+        }
+      }
+
+      function updateTally() {
+        for (const [sceneName, tile] of tiles) {
+          tile.el.classList.remove('tally-pgm', 'tally-pvw');
+          if (sceneName === currentPgm) tile.el.classList.add('tally-pgm');
+          else if (sceneName === currentPvw) tile.el.classList.add('tally-pvw');
+        }
+        pgmLabel.textContent = currentPgm || '—';
+        pvwLabel.textContent = currentPvw || '—';
+      }
+
+      async function rebuild() {
+        stopPolling();
+        try {
+          const { scenes, currentProgramSceneName, currentPreviewSceneName } =
+            await MS.connection.obs.call('GetSceneList');
+          currentPgm = currentProgramSceneName;
+          currentPvw = currentPreviewSceneName;
+
+          const currentSceneNames = new Set(scenes.map((s) => s.sceneName));
+
+          // Remove tiles for scenes that no longer exist
+          for (const [name] of tiles) {
+            if (!currentSceneNames.has(name)) {
+              tiles.get(name).el.remove();
+              tiles.delete(name);
+            }
+          }
+
+          // Add tiles for new scenes (reverse — OBS returns bottom-to-top)
+          for (const scene of [...scenes].reverse()) {
+            if (!tiles.has(scene.sceneName)) {
+              const isMedia = isMediaSheet(scene.sceneName);
+              const inputName = isMedia
+                ? await discoverInputName(scene.sceneName)
+                : null;
+              const el = createTileElement(scene.sceneName, inputName, isMedia);
+              container.appendChild(el);
+
+              const tileData = {
+                sceneName: scene.sceneName,
+                inputName,
+                el,
+                isMedia,
+                duration: 0,
+                cursor: 0,
+                mediaState: null,
+              };
+              tiles.set(scene.sceneName, tileData);
+
+              // Fetch thumbnail
+              const thumbEl = el.querySelector('.tile-thumbnail');
+              fetchThumbnail(scene.sceneName, thumbEl);
+            }
+          }
+
+          updateTally();
+          startPolling();
+          logEvent('Grid rebuilt');
+        } catch (err) {
+          console.error('Failed to rebuild grid:', err);
+        }
+      }
+
+      // Polling
+      function startPolling() {
+        // PGM tile: 500ms media status + 5s screenshot
+        // Other tiles: 2s media status
+        const pgmMediaPoll = setInterval(() => {
+          if (!currentPgm) return;
+          const tile = tiles.get(currentPgm);
+          if (tile?.isMedia) updateMediaStatus(tile);
+        }, 500);
+
+        const otherMediaPoll = setInterval(() => {
+          for (const [name, tile] of tiles) {
+            if (!tile.isMedia || name === currentPgm) continue;
+            updateMediaStatus(tile);
+          }
+        }, 2000);
+
+        const pgmScreenshotPoll = setInterval(() => {
+          if (!currentPgm) return;
+          const tile = tiles.get(currentPgm);
+          if (tile) {
+            const thumbEl = tile.el.querySelector('.tile-thumbnail');
+            fetchThumbnail(currentPgm, thumbEl);
+          }
+        }, 5000);
+
+        pollTimers = [pgmMediaPoll, otherMediaPoll, pgmScreenshotPoll];
+      }
+
+      function stopPolling() {
+        for (const t of pollTimers) clearInterval(t);
+        pollTimers = [];
+      }
+
+      async function updateMediaStatus(tile) {
+        if (!tile.inputName || !MS.connection.connected) return;
+        try {
+          const status = await MS.connection.obs.call('GetMediaInputStatus', {
+            inputName: tile.inputName,
+          });
+
+          tile.duration = status.mediaDuration || 0;
+          tile.cursor = status.mediaCursor || 0;
+          tile.mediaState = status.mediaState;
+
+          // Update progress bar
+          const fill = tile.el.querySelector('.progress-bar-fill');
+          const timeEl = tile.el.querySelector('.progress-time');
+          if (fill && tile.duration > 0) {
+            fill.style.width = ((tile.cursor / tile.duration) * 100) + '%';
+          }
+          if (timeEl) {
+            timeEl.textContent = formatTime(tile.cursor) + ' / ' + formatTime(tile.duration);
+          }
+
+          // Update transport button states
+          const transportBtns = tile.el.querySelectorAll('.btn-transport');
+          for (const btn of transportBtns) {
+            btn.classList.remove('active');
+            const state = status.mediaState;
+            if (btn.dataset.cls === 'play' && state === 'OBS_MEDIA_STATE_PLAYING') btn.classList.add('active');
+            if (btn.dataset.cls === 'pause' && state === 'OBS_MEDIA_STATE_PAUSED') btn.classList.add('active');
+            if (btn.dataset.cls === 'stop' && (state === 'OBS_MEDIA_STATE_STOPPED' || state === 'OBS_MEDIA_STATE_ENDED')) btn.classList.add('active');
+          }
+        } catch {}
+      }
+
+      return {
+        rebuild,
+        tiles,
+        getTile: (name) => tiles.get(name),
+        get currentPgm() { return currentPgm; },
+        set currentPgm(v) { currentPgm = v; updateTally(); },
+        get currentPvw() { return currentPvw; },
+        set currentPvw(v) { currentPvw = v; updateTally(); },
+        logEvent,
+        updateTally,
+      };
+    })();
+
+    // ===== OBS Event Handlers =====
+    (function registerEvents() {
+      const obs = MS.connection.obs;
+
+      obs.on('CurrentProgramSceneChanged', (data) => {
+        MS.grid.currentPgm = data.sceneName;
+        MS.grid.logEvent('PGM → ' + data.sceneName);
+      });
+
+      obs.on('CurrentPreviewSceneChanged', (data) => {
+        MS.grid.currentPvw = data.sceneName;
+        MS.grid.logEvent('PVW → ' + data.sceneName);
+      });
+
+      obs.on('SceneCreated', (data) => {
+        MS.grid.rebuild();
+        MS.grid.logEvent('Scene created: ' + data.sceneName);
+      });
+
+      obs.on('SceneRemoved', (data) => {
+        MS.grid.rebuild();
+        MS.grid.logEvent('Scene removed: ' + data.sceneName);
+      });
+
+      obs.on('SceneNameChanged', (data) => {
+        const tile = MS.grid.tiles.get(data.oldSceneName);
+        if (tile) {
+          tile.sceneName = data.sceneName;
+          tile.el.dataset.scene = data.sceneName;
+          const label = tile.el.querySelector('.tile-label');
+          if (label) {
+            label.textContent = data.sceneName.startsWith('[MS] ')
+              ? data.sceneName.replace('[MS] ', '')
+              : data.sceneName;
+            label.title = data.sceneName;
+          }
+          MS.grid.tiles.delete(data.oldSceneName);
+          MS.grid.tiles.set(data.sceneName, tile);
+          if (MS.grid.currentPgm === data.oldSceneName) MS.grid.currentPgm = data.sceneName;
+          if (MS.grid.currentPvw === data.oldSceneName) MS.grid.currentPvw = data.sceneName;
+        }
+        MS.grid.logEvent('Renamed: ' + data.oldSceneName + ' → ' + data.sceneName);
+      });
+
+      obs.on('InputNameChanged', (data) => {
+        for (const [, tile] of MS.grid.tiles) {
+          if (tile.inputName === data.oldInputName) {
+            tile.inputName = data.inputName;
+            break;
+          }
+        }
+      });
+
+      obs.on('StudioModeStateChanged', (data) => {
+        if (!data.studioModeEnabled) {
+          MS.connection.obs.call('SetStudioModeEnabled', { studioModeEnabled: true })
+            .catch(() => console.warn('Could not re-enable studio mode'));
+        }
+      });
+    })();
+
+    // ===== Context Menu =====
+    MS.contextMenu = (() => {
+      const menu = document.getElementById('context-menu');
+      const btnRemove = document.getElementById('ctx-remove');
+      let targetScene = null;
+
+      function show(x, y, sceneName) {
+        targetScene = sceneName;
+        menu.style.left = x + 'px';
+        menu.style.top = y + 'px';
+        menu.hidden = false;
+      }
+
+      function hide() {
+        menu.hidden = true;
+        targetScene = null;
+      }
+
+      btnRemove.addEventListener('click', async () => {
+        if (!targetScene) return;
+        try {
+          await MS.connection.obs.call('RemoveScene', { sceneName: targetScene });
+        } catch (err) {
+          console.error('Failed to remove scene:', err);
+        }
+        hide();
+      });
+
+      document.addEventListener('click', hide);
+
+      return { show, hide };
+    })();
+
     // ===== Init =====
     (function init() {
       // Load fade duration from localStorage
