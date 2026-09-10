@@ -1132,6 +1132,152 @@
       return { show, hide };
     })();
 
+    // ===== File Import =====
+    MS.fileImport = (() => {
+      const btnAdd = document.getElementById('btn-add-input');
+      const fileInput = document.getElementById('file-input');
+      const pickerModal = document.getElementById('picker-modal');
+      const pickerList = document.getElementById('picker-list');
+      const pickerCancel = document.getElementById('picker-cancel');
+      const pickerFilename = document.getElementById('picker-filename');
+
+      btnAdd.addEventListener('click', () => fileInput.click());
+
+      fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        fileInput.value = '';
+        await importFile(file);
+      });
+
+      async function importFile(file) {
+        const { name, size, lastModified } = file;
+
+        let resolveResult;
+        try {
+          const resp = await fetch('/api/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, size, lastModified }),
+          });
+          resolveResult = await resp.json();
+        } catch (err) {
+          alert('MediaSheet server is unreachable — restart the server to add new files. Existing inputs are unaffected.');
+          return;
+        }
+
+        if (resolveResult.error === 'not_found') {
+          alert(resolveResult.message);
+          return;
+        }
+        if (resolveResult.error) {
+          alert(resolveResult.message || 'File resolution failed.');
+          return;
+        }
+
+        let filePath;
+        if (resolveResult.path) {
+          filePath = resolveResult.path;
+        } else if (resolveResult.matches) {
+          filePath = await showPicker(name, resolveResult.matches);
+          if (!filePath) return;
+        }
+
+        await createOBSInput(name, filePath);
+      }
+
+      function showPicker(filename, matches) {
+        return new Promise((resolve) => {
+          pickerFilename.textContent = `Select the correct "${filename}":`;
+          pickerList.innerHTML = '';
+
+          for (const m of matches) {
+            const li = document.createElement('li');
+            const pathDiv = document.createElement('div');
+            pathDiv.className = 'picker-path';
+            pathDiv.textContent = m.path;
+            li.appendChild(pathDiv);
+
+            const metaDiv = document.createElement('div');
+            metaDiv.className = 'picker-meta';
+            const sizeKB = Math.round(m.size / 1024);
+            const date = new Date(m.modified).toLocaleString();
+            metaDiv.textContent = `${sizeKB} KB · ${date}`;
+            li.appendChild(metaDiv);
+
+            li.addEventListener('click', () => {
+              pickerModal.hidden = true;
+              resolve(m.path);
+            });
+            pickerList.appendChild(li);
+          }
+
+          pickerCancel.onclick = () => {
+            pickerModal.hidden = true;
+            resolve(null);
+          };
+
+          pickerModal.hidden = false;
+        });
+      }
+
+      async function createOBSInput(filename, filePath) {
+        const obs = MS.connection.obs;
+
+        let sceneName = `[MS] ${filename}`;
+        let inputName = sceneName;
+        try {
+          const { scenes } = await obs.call('GetSceneList');
+          const { inputs } = await obs.call('GetInputList');
+          const sceneNames = new Set(scenes.map((s) => s.sceneName));
+          const inputNames = new Set(inputs.map((i) => i.inputName));
+
+          let counter = 1;
+          while (sceneNames.has(sceneName) || inputNames.has(inputName)) {
+            counter++;
+            sceneName = `[MS] ${filename} (${counter})`;
+            inputName = sceneName;
+          }
+        } catch (err) {
+          console.error('Failed to check for duplicates:', err);
+        }
+
+        try {
+          await obs.call('CreateScene', { sceneName });
+
+          const { sceneItemId } = await obs.call('CreateInput', {
+            sceneName,
+            inputName,
+            inputKind: 'ffmpeg_source',
+            inputSettings: {
+              local_file: filePath,
+              is_local_file: true,
+              restart_on_activate: false,
+              close_when_inactive: false,
+            },
+            sceneItemEnabled: true,
+          });
+
+          await obs.call('SetSceneItemTransform', {
+            sceneName,
+            sceneItemId,
+            sceneItemTransform: {
+              boundsType: 'OBS_BOUNDS_SCALE_INNER',
+              boundsWidth: MS.canvas.width,
+              boundsHeight: MS.canvas.height,
+              boundsAlignment: 0,
+            },
+          });
+
+          MS.grid.logEvent('Added: ' + filename);
+        } catch (err) {
+          alert(`Couldn't create scene in OBS. Check that OBS is running and the WebSocket connection is active.\n\n${err.message}`);
+        }
+      }
+
+      return { importFile };
+    })();
+
     // ===== Init =====
     (function init() {
       // Load fade duration from localStorage
