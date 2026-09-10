@@ -601,7 +601,8 @@
         await obs.call('SetStudioModeEnabled', { studioModeEnabled: true });
       } catch {}
 
-      // Resolve transitions by kind
+      MS.transitions.cutName = null;
+      MS.transitions.fadeName = null;
       try {
         const { transitions } = await obs.call('GetSceneTransitionList');
         for (const t of transitions) {
@@ -707,8 +708,6 @@
       return { show, hide };
     })();
 
-    // Stubs for modules defined in later tasks — prevents runtime errors
-    // when testing grid in isolation. Replaced by Tasks 7, 8, 9.
     // ===== Transport Controls =====
     MS.transport = (() => {
       async function action(inputName, mediaAction) {
