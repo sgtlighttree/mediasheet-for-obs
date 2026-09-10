@@ -794,7 +794,108 @@
 
       return { toggleMute, setVolume, loadInitialState };
     })();
-    MS.transitionControl = { cut() {}, fade() {}, take() {} };
+    // ===== Transition Control =====
+    MS.transitionControl = (() => {
+      const btnCut = document.getElementById('btn-cut');
+      const btnFade = document.getElementById('btn-fade');
+      const fadeDurationInput = document.getElementById('fade-duration');
+      let lastTransitionType = 'cut'; // 'cut' or 'fade'
+
+      async function cut() {
+        if (!MS.connection.connected) return;
+        lastTransitionType = 'cut';
+        try {
+          if (MS.transitions.cutName) {
+            await MS.connection.obs.call('SetCurrentSceneTransition', {
+              transitionName: MS.transitions.cutName,
+            });
+          }
+          await MS.connection.obs.call('TriggerStudioModeTransition');
+          await restartOnTake();
+        } catch (err) {
+          console.error('Cut transition failed:', err);
+        }
+      }
+
+      async function fade(durationMs) {
+        if (!MS.connection.connected) return;
+        lastTransitionType = 'fade';
+        durationMs = durationMs || parseInt(fadeDurationInput.value, 10) || 300;
+        try {
+          if (MS.transitions.fadeName) {
+            await MS.connection.obs.call('SetCurrentSceneTransition', {
+              transitionName: MS.transitions.fadeName,
+            });
+            await MS.connection.obs.call('SetCurrentSceneTransitionDuration', {
+              transitionDuration: durationMs,
+            });
+          }
+          await MS.connection.obs.call('TriggerStudioModeTransition');
+          await restartOnTake();
+        } catch (err) {
+          console.error('Fade transition failed:', err);
+        }
+      }
+
+      async function take(sceneName) {
+        // First, load to PVW
+        try {
+          await MS.connection.obs.call('SetCurrentPreviewScene', { sceneName });
+        } catch (err) {
+          console.error('SetCurrentPreviewScene failed:', err);
+          return;
+        }
+
+        // Then transition using last-selected type
+        if (lastTransitionType === 'fade') {
+          await fade();
+        } else {
+          await cut();
+        }
+      }
+
+      async function restartOnTake() {
+        // After transition, the new PGM scene's media should restart from the top
+        // Wait a tick for the transition event to update currentPgm
+        await new Promise((r) => setTimeout(r, 50));
+        const pgmTile = MS.grid.getTile(MS.grid.currentPgm);
+        if (pgmTile?.isMedia && pgmTile.inputName) {
+          try {
+            await MS.connection.obs.call('SetMediaInputCursor', {
+              inputName: pgmTile.inputName,
+              mediaCursor: 0,
+            });
+            await MS.connection.obs.call('TriggerMediaInputAction', {
+              inputName: pgmTile.inputName,
+              mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY',
+            });
+          } catch (err) {
+            console.error('Restart-on-take failed:', err);
+          }
+        }
+      }
+
+      function updateButtonHighlight() {
+        btnCut.classList.toggle('btn-primary', lastTransitionType === 'cut');
+        btnFade.classList.toggle('btn-primary', lastTransitionType === 'fade');
+      }
+
+      btnCut.addEventListener('click', () => {
+        lastTransitionType = 'cut';
+        updateButtonHighlight();
+        cut();
+      });
+      btnFade.addEventListener('click', () => {
+        lastTransitionType = 'fade';
+        updateButtonHighlight();
+        const duration = parseInt(fadeDurationInput.value, 10) || 300;
+        fade(duration);
+      });
+
+      updateButtonHighlight();
+
+      return { cut, fade, take };
+    })();
 
     // ===== Scene Grid =====
     MS.grid = (() => {
