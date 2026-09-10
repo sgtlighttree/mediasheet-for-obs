@@ -31,6 +31,7 @@
       --ms-font: 'Open Sans', '.AppleSystemUIFont', Helvetica, Arial, 'MS Shell Dlg', sans-serif;
     }
 
+    /* === Reset + Base === */
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
@@ -41,13 +42,422 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      font-size: 13px;
+    }
+
+    /* === Top Bar === */
+    #top-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 40px;
+      padding: 0 12px;
+      background: var(--ms-bg-base);
+      border-bottom: 1px solid var(--ms-border);
+      flex-shrink: 0;
+    }
+
+    .top-bar-left, .top-bar-center, .top-bar-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .status-dot.connected { background: var(--ms-success); }
+    .status-dot.reconnecting { background: var(--ms-warning); }
+    .status-dot.disconnected { background: var(--ms-danger); }
+
+    .server-status {
+      color: var(--ms-warning);
+      font-size: 11px;
+    }
+
+    /* === Buttons === */
+    .btn {
+      background: var(--ms-button-bg);
+      color: var(--ms-text);
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius);
+      padding: 4px 12px;
+      cursor: pointer;
+      font-family: var(--ms-font);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .btn:hover { background: var(--ms-button-hover); }
+    .btn:active { background: var(--ms-button-down); }
+    .btn:disabled { opacity: 0.4; cursor: default; }
+    .btn:disabled:hover { background: var(--ms-button-bg); }
+
+    .btn-primary {
+      background: var(--ms-primary);
+      border-color: var(--ms-primary-dark);
+    }
+    .btn-primary:hover { background: var(--ms-primary-light); }
+
+    .btn-icon {
+      padding: 4px 6px;
+      border: none;
+      background: transparent;
+    }
+    .btn-icon:hover { background: var(--ms-button-hover); }
+
+    .btn-transition {
+      font-weight: 700;
+      min-width: 50px;
+      text-align: center;
+    }
+
+    .duration-input {
+      width: 60px;
+      background: var(--ms-input-bg);
+      color: var(--ms-text);
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius-sm);
+      padding: 3px 6px;
+      font-family: var(--ms-font);
+      font-size: 12px;
+      text-align: center;
+    }
+    .duration-label {
+      font-size: 11px;
+      color: var(--ms-text-muted);
+    }
+
+    /* === Tile Grid === */
+    #tile-grid {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 8px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 8px;
+      align-content: start;
+    }
+
+    /* === Tile === */
+    .tile {
+      background: var(--ms-bg-base);
+      border: 2px solid var(--ms-border);
+      border-radius: var(--ms-radius-lg);
+      overflow: hidden;
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+    }
+    .tile.tally-pgm { border-color: var(--ms-tally-pgm); }
+    .tile.tally-pvw { border-color: var(--ms-tally-pvw); }
+
+    .tile-thumbnail {
+      width: 100%;
+      aspect-ratio: 16/9;
+      background: var(--ms-bg-preview);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+    }
+    .tile-thumbnail img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .tile-thumbnail .fallback-icon {
+      font-size: 32px;
+      color: var(--ms-text-muted);
+    }
+
+    .tile-label {
+      padding: 4px 8px;
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* === Transport Controls (media tiles only) === */
+    .tile-transport {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 2px 8px;
+    }
+    .tile-transport .btn-transport {
+      background: none;
+      border: none;
+      color: var(--ms-text);
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: var(--ms-radius-sm);
+      font-size: 14px;
+      line-height: 1;
+    }
+    .tile-transport .btn-transport:hover { background: var(--ms-button-hover); }
+    .tile-transport .btn-transport.active { color: var(--ms-text-muted); }
+
+    /* === Progress Bar === */
+    .tile-progress {
+      padding: 2px 8px 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .progress-bar {
+      flex: 1;
+      height: 4px;
+      background: var(--ms-bg-preview);
+      border-radius: 2px;
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--ms-primary-light);
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.3s linear;
+    }
+    .progress-time {
+      font-size: 10px;
+      color: var(--ms-text-muted);
+      white-space: nowrap;
+      min-width: 80px;
+      text-align: right;
+    }
+
+    /* === Audio Controls === */
+    .tile-audio {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 8px 6px;
+    }
+    .btn-mute {
+      background: none;
+      border: none;
+      color: var(--ms-text);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 2px;
+    }
+    .btn-mute.muted { color: var(--ms-danger); }
+    .volume-slider {
+      flex: 1;
+      height: 4px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: var(--ms-bg-preview);
+      border-radius: 2px;
+      outline: none;
+    }
+    .volume-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--ms-primary-light);
+      cursor: pointer;
+    }
+
+    /* === Modals === */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .modal {
+      background: var(--ms-bg-base);
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius-lg);
+      padding: 20px;
+      min-width: 320px;
+      max-width: 480px;
+    }
+    .modal h3 {
+      margin-bottom: 16px;
+      font-size: 15px;
+    }
+    .modal label {
+      display: block;
+      margin-bottom: 12px;
+      font-size: 12px;
+      color: var(--ms-text-muted);
+    }
+    .modal input[type="text"],
+    .modal input[type="number"],
+    .modal input[type="password"] {
+      display: block;
+      width: 100%;
+      margin-top: 4px;
+      padding: 6px 8px;
+      background: var(--ms-input-bg);
+      color: var(--ms-text);
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius);
+      font-family: var(--ms-font);
+      font-size: 13px;
+    }
+    .password-row {
+      display: flex;
+      gap: 4px;
+      margin-top: 4px;
+    }
+    .password-row input { flex: 1; }
+    .modal-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    /* === Picker Modal === */
+    #picker-list {
+      list-style: none;
+      margin: 12px 0;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    #picker-list li {
+      padding: 8px;
+      border-radius: var(--ms-radius);
+      cursor: pointer;
+      font-size: 12px;
+      border: 1px solid transparent;
+    }
+    #picker-list li:hover { background: var(--ms-button-hover); }
+    .picker-path { word-break: break-all; }
+    .picker-meta { color: var(--ms-text-muted); font-size: 11px; margin-top: 2px; }
+
+    /* === Context Menu === */
+    .context-menu {
+      position: fixed;
+      background: var(--ms-bg-base);
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius);
+      z-index: 200;
+      min-width: 140px;
+    }
+    .context-menu-item {
+      display: block;
+      width: 100%;
+      padding: 8px 12px;
+      background: none;
+      border: none;
+      color: var(--ms-text);
+      font-family: var(--ms-font);
+      font-size: 12px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .context-menu-item:hover { background: var(--ms-button-hover); }
+
+    /* === Bottom Bar === */
+    #bottom-bar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      height: 32px;
+      padding: 0 12px;
+      background: var(--ms-bg-base);
+      border-top: 1px solid var(--ms-border);
+      flex-shrink: 0;
+      font-size: 12px;
+    }
+    .pgm-label strong { color: var(--ms-tally-pgm); }
+    .pvw-label strong { color: var(--ms-tally-pvw); }
+    .last-event {
+      margin-left: auto;
+      color: var(--ms-text-muted);
+      font-size: 10px;
     }
   </style>
 </head>
 <body>
-  <div id="app">
-    <!-- Top bar, tile grid, bottom bar will be added in subsequent tasks -->
+  <!-- Top Bar -->
+  <header id="top-bar">
+    <div class="top-bar-left">
+      <span id="connection-dot" class="status-dot disconnected"></span>
+      <span id="connection-text">Disconnected</span>
+      <span id="server-status" class="server-status" hidden>Server offline</span>
+    </div>
+    <div class="top-bar-center">
+      <button id="btn-add-input" class="btn" disabled>Add Input</button>
+      <input type="file" id="file-input" accept="video/*,audio/*,image/*" hidden>
+    </div>
+    <div class="top-bar-right">
+      <button id="btn-cut" class="btn btn-transition" disabled>CUT</button>
+      <button id="btn-fade" class="btn btn-transition" disabled>FADE</button>
+      <input type="number" id="fade-duration" class="duration-input" value="300" min="50" max="5000" step="50" title="Fade duration (ms)">
+      <span class="duration-label">ms</span>
+      <button id="btn-settings" class="btn btn-icon" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <!-- Tile Grid -->
+  <main id="tile-grid"></main>
+
+  <!-- Disambiguation Picker Modal -->
+  <div id="picker-modal" class="modal-overlay" hidden>
+    <div class="modal">
+      <h3>Multiple files found</h3>
+      <p id="picker-filename"></p>
+      <ul id="picker-list"></ul>
+      <button id="picker-cancel" class="btn">Cancel</button>
+    </div>
   </div>
+
+  <!-- Connection Config Modal -->
+  <div id="config-modal" class="modal-overlay" hidden>
+    <div class="modal">
+      <h3>OBS Connection</h3>
+      <label>
+        Host
+        <input type="text" id="config-host" value="localhost" autocomplete="off">
+      </label>
+      <label>
+        Port
+        <input type="number" id="config-port" value="4455" min="1" max="65535">
+      </label>
+      <label>
+        Password
+        <div class="password-row">
+          <input type="password" id="config-password" autocomplete="off" placeholder="(leave empty if none)">
+          <button id="btn-toggle-password" class="btn btn-icon" type="button">👁</button>
+        </div>
+      </label>
+      <div class="modal-actions">
+        <button id="btn-connect" class="btn btn-primary">Connect</button>
+        <button id="btn-disconnect" class="btn" hidden>Disconnect</button>
+        <button id="btn-config-close" class="btn">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Context Menu (right-click on tile) -->
+  <div id="context-menu" class="context-menu" hidden>
+    <button id="ctx-remove" class="context-menu-item">Remove Input</button>
+  </div>
+
+  <!-- Bottom Bar -->
+  <footer id="bottom-bar">
+    <span class="pgm-label">PGM: <strong id="pgm-name">—</strong></span>
+    <span class="pvw-label">PVW: <strong id="pvw-name">—</strong></span>
+    <span id="last-event" class="last-event"></span>
+  </footer>
+
   <script src="vendor/obs-websocket-js.min.js"></script>
   <script>
     // Application code will be added in subsequent tasks
