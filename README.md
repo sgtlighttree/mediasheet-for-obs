@@ -26,15 +26,15 @@ npm install
 npm start
 ```
 
-The server starts on `http://localhost:3000`.
+The server starts on `http://localhost:3001`.
 
 ### 3. Open the control surface
 
-**Option A — Browser:** Navigate to `http://localhost:3000`
+**Option A — Browser:** Navigate to `http://localhost:3001`
 
 **Option B — OBS Custom Browser Dock:**
 1. In OBS: **View → Docks → Custom Browser Docks...**
-2. Set the URL to `http://localhost:3000`
+2. Set the URL to `http://localhost:3001`
 3. Dock it wherever you like in your OBS layout
 
 ## Usage
