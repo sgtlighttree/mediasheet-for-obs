@@ -737,7 +737,63 @@
 
       return { action, seek };
     })();
-    MS.audio = { toggleMute() {}, setVolume() {}, loadInitialState() {} };
+    // ===== Audio Controls =====
+    MS.audio = (() => {
+      async function toggleMute(inputName) {
+        if (!MS.connection.connected || !inputName) return;
+        try {
+          const { inputMuted } = await MS.connection.obs.call('ToggleInputMute', { inputName });
+          updateMuteUI(inputName, inputMuted);
+        } catch (err) {
+          console.error('Mute toggle failed:', err);
+        }
+      }
+
+      async function setVolume(inputName, db) {
+        if (!MS.connection.connected || !inputName) return;
+        try {
+          await MS.connection.obs.call('SetInputVolume', {
+            inputName,
+            inputVolumeDb: db,
+          });
+        } catch (err) {
+          console.error('Set volume failed:', err);
+        }
+      }
+
+      async function loadInitialState(inputName, tileEl) {
+        if (!MS.connection.connected || !inputName) return;
+        try {
+          const [volResult, muteResult] = await Promise.all([
+            MS.connection.obs.call('GetInputVolume', { inputName }),
+            MS.connection.obs.call('GetInputMute', { inputName }),
+          ]);
+
+          const slider = tileEl.querySelector('.volume-slider');
+          if (slider) {
+            const db = Math.max(-60, Math.min(0, volResult.inputVolumeDb));
+            slider.value = db;
+          }
+
+          updateMuteUI(inputName, muteResult.inputMuted);
+        } catch {}
+      }
+
+      function updateMuteUI(inputName, muted) {
+        for (const [, tile] of MS.grid.tiles) {
+          if (tile.inputName === inputName) {
+            const btn = tile.el.querySelector('.btn-mute');
+            if (btn) {
+              btn.textContent = muted ? '🔇' : '🔊';
+              btn.classList.toggle('muted', muted);
+            }
+            break;
+          }
+        }
+      }
+
+      return { toggleMute, setVolume, loadInitialState };
+    })();
     MS.transitionControl = { cut() {}, fade() {}, take() {} };
 
     // ===== Scene Grid =====
@@ -970,6 +1026,9 @@
                 mediaState: null,
               };
               tiles.set(scene.sceneName, tileData);
+              if (isMedia && inputName) {
+                MS.audio.loadInitialState(inputName, el);
+              }
 
               // Fetch thumbnail
               const thumbEl = el.querySelector('.tile-thumbnail');
