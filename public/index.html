@@ -463,8 +463,10 @@
   </footer>
 
   <script src="vendor/obs-websocket-js.min.js"></script>
+  <script src="playlist.js"></script>
   <script>
     const MS = {};
+    const EVENT_SUBSCRIPTIONS = 4095 | (1 << 16) | (1 << 17);
 
     // ===== Connection Manager =====
     MS.connection = (() => {
@@ -508,7 +510,10 @@
 
         try {
           const url = `ws://${host}:${port}`;
-          await obs.connect(url, password || undefined, { rpcVersion: 1 });
+          await obs.connect(url, password || undefined, {
+            rpcVersion: 1,
+            eventSubscriptions: EVENT_SUBSCRIPTIONS,
+          });
           connected = true;
           reconnectDelay = 1000;
           saveConfig(host, port, password);
@@ -590,6 +595,111 @@
       };
     })();
 
+    // ===== OBS-side Store =====
+    // Lives in OBS persistent data so the OBS dock and any browser tab agree.
+    MS.store = (() => {
+      const REALM = 'OBS_WEBSOCKET_DATA_REALM_GLOBAL';
+      const SLOT = 'mediasheet';
+      const FALLBACK_KEY = 'ms_store';
+      const DEFAULT_DEVICE = 'External Headphones';
+      let data = normalize(null);
+
+      function normalize(v) {
+        return {
+          managed: Array.isArray(v?.managed) ? v.managed : [],
+          subgrid: v?.subgrid && typeof v.subgrid === 'object' ? v.subgrid : {},
+          expectedDevice: typeof v?.expectedDevice === 'string' && v.expectedDevice
+            ? v.expectedDevice
+            : DEFAULT_DEVICE,
+        };
+      }
+
+      async function load() {
+        try {
+          const { slotValue } = await MS.connection.obs.call('GetPersistentData', { realm: REALM, slotName: SLOT });
+          data = normalize(slotValue);
+        } catch {
+          try { data = normalize(JSON.parse(localStorage.getItem(FALLBACK_KEY))); } catch { data = normalize(null); }
+        }
+        return data;
+      }
+
+      // Re-read before writing so two clients don't overwrite each other with stale data.
+      async function update(fn) {
+        await load();
+        data = normalize(fn(data));
+        try {
+          await MS.connection.obs.call('SetPersistentData', { realm: REALM, slotName: SLOT, slotValue: data });
+        } catch {
+          try { localStorage.setItem(FALLBACK_KEY, JSON.stringify(data)); } catch {}
+        }
+        return data;
+      }
+
+      return { load, update, get: () => data };
+    })();
+
+    // ===== Playlist Scan =====
+    MS.playlists = (() => {
+      const P = window.MSPlaylist;
+      const inputInfo = new Map(); // inputName → { kind, file }
+      const scans = new Map(); // sceneName → { sceneName, items, detection }
+
+      async function infoFor(item) {
+        if (item.sourceType !== 'OBS_SOURCE_TYPE_INPUT') return { kind: 'other', file: null };
+        if (inputInfo.has(item.sourceName)) return inputInfo.get(item.sourceName);
+        let info = { kind: 'other', file: null };
+        try {
+          const { inputSettings } = await MS.connection.obs.call('GetInputSettings', { inputName: item.sourceName });
+          const file = inputSettings.local_file ?? inputSettings.file ?? null;
+          info = {
+            kind: P.classifyItem({
+              inputKind: item.inputKind,
+              localFile: file,
+              isLocalFile: inputSettings.is_local_file,
+            }),
+            file,
+          };
+        } catch {}
+        inputInfo.set(item.sourceName, info);
+        return info;
+      }
+
+      async function scan(sceneName) {
+        const { sceneItems } = await MS.connection.obs.call('GetSceneItemList', { sceneName });
+        const items = [];
+        for (const it of sceneItems) {
+          const info = await infoFor(it);
+          items.push({
+            sceneItemId: it.sceneItemId,
+            sourceName: it.sourceName,
+            kind: info.kind,
+            file: info.file,
+            enabled: it.sceneItemEnabled,
+            index: it.sceneItemIndex,
+          });
+        }
+        const result = { sceneName, items, detection: P.detectPlaylist(items) };
+        scans.set(sceneName, result);
+        return result;
+      }
+
+      function invalidate(inputName) {
+        inputInfo.delete(inputName);
+      }
+
+      MS.connection.obs.on('InputSettingsChanged', (d) => invalidate(d.inputName));
+      MS.connection.obs.on('InputRemoved', (d) => invalidate(d.inputName));
+      MS.connection.obs.on('InputNameChanged', (d) => invalidate(d.oldInputName));
+
+      return {
+        scan,
+        invalidate,
+        getScan: (sceneName) => scans.get(sceneName),
+        isPlaylist: (sceneName) => !!scans.get(sceneName)?.detection.auto,
+      };
+    })();
+
     // ===== Transition Resolver =====
     MS.transitions = { cutName: null, fadeName: null };
 
@@ -641,6 +751,8 @@
       document.getElementById('btn-hold-frames').disabled = false;
       document.getElementById('btn-cut').disabled = false;
       document.getElementById('btn-fade').disabled = false;
+
+      await MS.store.load();
 
       // Build scene grid (Task 5)
       if (MS.grid) MS.grid.rebuild();
@@ -1115,7 +1227,9 @@
           // Add tiles for new scenes (reverse — OBS returns bottom-to-top)
           for (const scene of [...scenes].reverse()) {
             if (!tiles.has(scene.sceneName)) {
-              const isMedia = isMediaSheet(scene.sceneName);
+              const scan = await MS.playlists.scan(scene.sceneName).catch(() => null);
+              const isPlaylist = !!scan?.detection.auto;
+              const isMedia = isMediaSheet(scene.sceneName) && !isPlaylist;
               const inputName = isMedia
                 ? await discoverInputName(scene.sceneName)
                 : null;
@@ -1127,6 +1241,7 @@
                 inputName,
                 el,
                 isMedia,
+                isPlaylist,
                 duration: 0,
                 cursor: 0,
                 mediaState: null,
@@ -1136,9 +1251,11 @@
                 MS.audio.loadInitialState(inputName, el);
               }
 
-              // Fetch thumbnail
-              const thumbEl = el.querySelector('.tile-thumbnail');
-              fetchThumbnail(scene.sceneName, thumbEl);
+              // With Duplicate Scene a scene screenshot shows the Preview edit state, so playlists skip it
+              if (!isPlaylist) {
+                const thumbEl = el.querySelector('.tile-thumbnail');
+                fetchThumbnail(scene.sceneName, thumbEl);
+              }
             }
           }
 
@@ -1170,7 +1287,7 @@
         const pgmScreenshotPoll = setInterval(() => {
           if (!currentPgm) return;
           const tile = tiles.get(currentPgm);
-          if (tile) {
+          if (tile && !tile.isPlaylist) {
             const thumbEl = tile.el.querySelector('.tile-thumbnail');
             fetchThumbnail(currentPgm, thumbEl);
           }

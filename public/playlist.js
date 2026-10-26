@@ -1,3 +1,4 @@
+(function () {
 const EXT = {
   video: ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'mpg', 'mpeg', 'ts', 'mxf', 'flv', 'wmv'],
   image: ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tif', 'tiff', 'heic', 'svg'],
@@ -136,3 +137,4 @@ const api = {
 
 if (typeof module !== 'undefined') module.exports = api;
 else window.MSPlaylist = api;
+})();
