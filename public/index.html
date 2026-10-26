@@ -269,6 +269,9 @@
       cursor: pointer;
     }
 
+    /* Author display rules (e.g. .modal-overlay flex) otherwise override the UA [hidden] style */
+    [hidden] { display: none !important; }
+
     /* === Modals === */
     .modal-overlay {
       position: fixed;
