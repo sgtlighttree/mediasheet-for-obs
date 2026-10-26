@@ -1,12 +1,23 @@
 const express = require('express');
 const path = require('path');
 const { resolveFile } = require('./lib/resolve');
+const { readSceneDuplication } = require('./lib/obsconfig');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+function isLoopback(req) {
+  return LOOPBACK.has(req.socket.remoteAddress);
+}
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/api/obs-config', async (req, res) => {
+  if (!isLoopback(req)) return res.status(403).json({ error: 'forbidden' });
+  res.json({ sceneDuplication: await readSceneDuplication() });
+});
 
 app.post('/api/resolve', async (req, res) => {
   const { name, size, lastModified } = req.body || {};
