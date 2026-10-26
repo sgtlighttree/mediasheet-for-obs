@@ -327,6 +327,28 @@
     .clip-tile.tally-pvw .clip-badge { background: var(--ms-tally-pvw); }
     .clip-badge:empty { display: none; }
     .clip-tile.cueing { opacity: 0.6; }
+    .subgrid-head { width: 100%; display: flex; align-items: center; gap: 8px; }
+    .subgrid-head .subgrid-title { width: auto; flex: 1; }
+    .btn-manage {
+      font-size: 10px;
+      padding: 1px 8px;
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius-sm);
+      background: var(--ms-button-bg);
+      color: var(--ms-text);
+      cursor: pointer;
+    }
+    .btn-manage.on { background: var(--ms-primary); border-color: var(--ms-primary-dark); }
+    .pileup {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      font-size: 11px;
+      background: var(--ms-warning);
+      border-radius: var(--ms-radius-sm);
+    }
     .clip-restart {
       position: absolute;
       top: 3px;
@@ -851,7 +873,8 @@
       await MS.store.load();
 
       // Build scene grid (Task 5)
-      if (MS.grid) MS.grid.rebuild();
+      if (MS.grid) await MS.grid.rebuild();
+      if (MS.manager) MS.manager.onConnect().catch((err) => console.error('Manager init failed:', err));
     }
 
     function onDisconnected() {
@@ -1712,10 +1735,32 @@
         const row = document.createElement('div');
         row.className = 'subgrid-row';
         row.dataset.scene = sceneName;
+        const head = document.createElement('div');
+        head.className = 'subgrid-head';
         const title = document.createElement('div');
         title.className = 'subgrid-title';
         title.textContent = `${sceneName} — ${scan.detection.auto ? scan.detection.kind + ' playlist' : 'sources'}`;
-        row.appendChild(title);
+        head.appendChild(title);
+        if (scan.detection.auto) {
+          const manage = document.createElement('button');
+          manage.className = 'btn-manage';
+          const paint = () => {
+            const on = MS.store.get().managed.includes(sceneName);
+            manage.classList.toggle('on', on);
+            manage.textContent = on ? 'Managed' : 'Manage';
+            manage.title = on
+              ? 'MediaSheet resets idle clips, mutes clips that leave Program and normalizes settings. Click to stop managing.'
+              : 'Let MediaSheet manage this playlist (idle reset, mute on leave, hold-frame). Cueing a clip also does this.';
+          };
+          paint();
+          manage.addEventListener('click', async () => {
+            const on = !MS.store.get().managed.includes(sceneName);
+            await MS.manager.setManaged(sceneName, on);
+            paint();
+          });
+          head.appendChild(manage);
+        }
+        row.appendChild(head);
 
         const list = (scan.detection.auto ? scan.detection.clips : scan.items)
           .slice()
@@ -1912,7 +1957,7 @@
           if (item.kind === 'video' && !active.has(item.sourceName)) await primeFirstFrame(item.sourceName);
 
           if (!MS.store.get().managed.includes(sceneName)) {
-            await MS.store.update((d) => ({ ...d, managed: [...new Set([...d.managed, sceneName])] }));
+            await MS.manager.setManaged(sceneName, true);
           }
           MS.grid.logEvent(`Cued: ${item.sourceName}`);
         } catch (err) {
@@ -1941,6 +1986,227 @@
         resetSession() { sawTransitionEnd = false; },
         get busy() { return busy; },
       };
+    })();
+
+    // ===== Playlist Manager =====
+    // Everything here acts only on MANAGED playlist scenes, and never on an input that is live on Program
+    // except to unmute/route it as part of going live.
+    MS.manager = (() => {
+      const P = window.MSPlaylist;
+      const obs = MS.connection.obs;
+      const ACT = 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_';
+      const views = { pgm: null, pvw: null };
+      const idleTimers = new Map();
+      let defaults = null;
+      let transitioning = false;
+      let transitionEndedAt = null;
+
+      const managedSet = () => new Set(MS.store.get().managed);
+      const isManagedPlaylist = (scene) => managedSet().has(scene) && MS.playlists.isPlaylist(scene);
+
+      async function run(reqs) {
+        for (const r of reqs) await obs.call(r.request, r.data);
+      }
+
+      async function activeSet(items) {
+        const flags = await Promise.all(items.map((i) =>
+          obs.call('GetSourceActive', { sourceName: i.sourceName }).then((r) => r.videoActive).catch(() => false)));
+        return new Set(items.filter((_, i) => flags[i]).map((i) => i.sourceName));
+      }
+
+      function managedSceneFor(inputName) {
+        for (const scene of managedSet()) {
+          const scan = MS.playlists.getScan(scene);
+          const clip = scan?.detection.auto && scan.detection.clips.find((c) => c.sourceName === inputName);
+          if (clip) return { scene, clip };
+        }
+        return null;
+      }
+
+      async function onInactive(inputName) {
+        const hit = managedSceneFor(inputName);
+        if (!hit) return;
+        const { videoActive } = await obs.call('GetSourceActive', { sourceName: inputName });
+        await run(P.planLeave({
+          sourceName: inputName,
+          kind: hit.clip.kind,
+          active: videoActive ? new Set([inputName]) : new Set(),
+        }));
+      }
+
+      async function onActive(inputName) {
+        const hit = managedSceneFor(inputName);
+        if (!hit || hit.clip.kind !== 'video') return;
+        const [{ inputMuted }, { monitorType }] = await Promise.all([
+          obs.call('GetInputMute', { inputName }),
+          obs.call('GetInputAudioMonitorType', { inputName }),
+        ]);
+        await run(P.planActivate({
+          sourceName: inputName,
+          kind: hit.clip.kind,
+          muted: inputMuted,
+          monitorType,
+          streamOnlyChosen: MS.cue.streamOnlyChosen.has(inputName),
+          monitorSwitchSafe: true,
+        }));
+      }
+
+      async function evaluateIdle(sceneName, trigger) {
+        if (!isManagedPlaylist(sceneName)) return;
+        const scan = await MS.playlists.scan(sceneName);
+        if (!scan.detection.auto) return;
+        const { currentProgramSceneName, currentPreviewSceneName } = await obs.call('GetSceneList');
+        const clips = scan.detection.clips;
+        if (!P.shouldIdleReset({
+          managed: true,
+          isProgram: currentProgramSceneName === sceneName,
+          isPreview: currentPreviewSceneName === sceneName,
+          enabledClipCount: clips.filter((c) => c.enabled).length,
+          trigger,
+        })) return;
+        await run(P.planIdle({ sceneName, clips, active: await activeSet(clips) }));
+        MS.grid.logEvent(`Idle reset: ${sceneName}`);
+      }
+
+      function scheduleIdle(sceneName, trigger) {
+        clearTimeout(idleTimers.get(sceneName));
+        idleTimers.set(sceneName, setTimeout(() => {
+          evaluateIdle(sceneName, trigger).catch((err) => console.error('Idle reset failed:', err));
+        }, 500));
+      }
+
+      async function ensureDefaults() {
+        if (!defaults) {
+          defaults = (await obs.call('GetInputDefaultSettings', { inputKind: 'ffmpeg_source' })).defaultInputSettings;
+        }
+        return defaults;
+      }
+
+      // Compare effective values: a key left at its default is absent from GetInputSettings.
+      async function normalizeInput(inputName, want) {
+        const d = await ensureDefaults();
+        const { inputSettings } = await obs.call('GetInputSettings', { inputName });
+        const patch = {};
+        for (const [k, v] of Object.entries(want)) {
+          if ((inputSettings[k] ?? d[k]) !== v) patch[k] = v;
+        }
+        if (!Object.keys(patch).length) return false;
+        await obs.call('SetInputSettings', { inputName, inputSettings: patch, overlay: true });
+        return true;
+      }
+
+      async function normalizeScene(sceneName) {
+        if (!isManagedPlaylist(sceneName)) return 0;
+        const scan = await MS.playlists.scan(sceneName);
+        let changed = 0;
+        for (const clip of scan.detection.clips) {
+          if (clip.kind !== 'video') continue;
+          if (await normalizeInput(clip.sourceName, { clear_on_media_end: false, restart_on_activate: true })) changed++;
+        }
+        if (changed) MS.grid.logEvent(`Normalized ${changed} clip(s) in ${sceneName}`);
+        return changed;
+      }
+
+      async function setManaged(sceneName, on) {
+        await MS.store.update((d) => ({
+          ...d,
+          managed: on
+            ? [...new Set([...d.managed, sceneName])]
+            : d.managed.filter((n) => n !== sceneName),
+        }));
+        if (on) {
+          await normalizeScene(sceneName).catch((err) => console.error('Normalize failed:', err));
+          scheduleIdle(sceneName, 'connect');
+        }
+        MS.subgrid.render(sceneName);
+      }
+
+      async function onConnect() {
+        const { currentProgramSceneName, currentPreviewSceneName } = await obs.call('GetSceneList');
+        views.pgm = currentProgramSceneName;
+        views.pvw = currentPreviewSceneName;
+        transitioning = false;
+        transitionEndedAt = null;
+        for (const scene of managedSet()) {
+          if (!MS.playlists.isPlaylist(scene)) continue;
+          await normalizeScene(scene).catch((err) => console.error('Normalize failed:', err));
+          scheduleIdle(scene, 'connect');
+        }
+      }
+
+      function leftViews(oldScene) {
+        if (oldScene && oldScene !== views.pgm && oldScene !== views.pvw) scheduleIdle(oldScene, 'leftViews');
+      }
+
+      obs.on('CurrentProgramSceneChanged', (d) => {
+        const old = views.pgm;
+        views.pgm = d.sceneName;
+        leftViews(old);
+      });
+      obs.on('CurrentPreviewSceneChanged', (d) => {
+        const old = views.pvw;
+        views.pvw = d.sceneName;
+        leftViews(old);
+      });
+      obs.on('SceneTransitionStarted', () => { transitioning = true; });
+      obs.on('SceneTransitionEnded', () => { transitioning = false; transitionEndedAt = Date.now(); });
+      obs.on('InputActiveStateChanged', (d) => {
+        const job = d.videoActive ? onActive(d.inputName) : onInactive(d.inputName);
+        job.catch((err) => console.error('Active-state handler failed:', err));
+      });
+      obs.on('SceneItemCreated', (d) => {
+        if (!managedSet().has(d.sceneName)) return;
+        setTimeout(() => normalizeScene(d.sceneName).catch(() => {}), 400);
+      });
+
+      // Pile-up: two or more clips of one playlist live on Program is never legitimate under solo.
+      function rowFor(sceneName) {
+        return [...document.querySelectorAll('.subgrid-row')].find((r) => r.dataset.scene === sceneName);
+      }
+      function hideBanner(row) { row?.querySelector('.pileup')?.remove(); }
+      async function resetPileup(sceneName) {
+        const scan = await MS.playlists.scan(sceneName);
+        await run(P.planIdle({ sceneName, clips: scan.detection.clips, active: new Set() }));
+        MS.grid.logEvent(`Pile-up reset: ${sceneName}`);
+      }
+      setInterval(async () => {
+        if (!MS.connection.connected) return;
+        for (const scene of managedSet()) {
+          const row = rowFor(scene);
+          if (!row) continue;
+          const activeClips = [...MS.subgrid.clips.entries()]
+            .filter(([k, c]) => k.startsWith(scene + '|') && c.active && c.item.kind === 'video')
+            .map(([, c]) => c.item.sourceName);
+          // Stopped clips can stay "active" in Program's copy until the next take; only playing ones are a pile-up
+          let live = 0;
+          if (scene === views.pgm && activeClips.length >= 2) {
+            const states = await Promise.all(activeClips.map((n) =>
+              obs.call('GetMediaInputStatus', { inputName: n }).then((r) => r.mediaState).catch(() => null)));
+            live = states.filter((st) => st === 'OBS_MEDIA_STATE_PLAYING').length;
+          }
+          const show = scene === views.pgm && P.shouldEvaluatePileup({
+            transitioning,
+            msSinceTransitionEnd: transitionEndedAt === null ? null : Date.now() - transitionEndedAt,
+            liveClips: live,
+          });
+          let banner = row.querySelector('.pileup');
+          if (!show) { hideBanner(row); continue; }
+          if (!banner) {
+            banner = document.createElement('div');
+            banner.className = 'pileup';
+            const text = document.createElement('span');
+            const btn = document.createElement('button');
+            btn.className = 'btn';
+            btn.textContent = 'Reset';
+            btn.addEventListener('click', () => resetPileup(scene).catch((err) => console.error(err)));
+            banner.append(text, btn);
+            row.insertBefore(banner, row.children[1] || null);
+          }
+          banner.querySelector('span').textContent = `${live} clips playing on Program — Reset?`;
+        }
+      }, 1000);
+
+      return { setManaged, normalizeInput, normalizeScene, evaluateIdle, onConnect, isManagedPlaylist };
     })();
 
     // ===== File Import =====
@@ -2117,17 +2383,15 @@
         btn.disabled = true;
         try {
           const { inputs } = await obs.call('GetInputList', { inputKind: 'ffmpeg_source' });
+          // Read-first: only touch sources whose effective value differs. Safe on live clips (settings updates don't restart them).
           const results = await Promise.allSettled(inputs.map((input) =>
-            obs.call('SetInputSettings', {
-              inputName: input.inputName,
-              inputSettings: { clear_on_media_end: false },
-              overlay: true,
-            })
-          ));
+            MS.manager.normalizeInput(input.inputName, { clear_on_media_end: false })));
           const failed = results.filter((r) => r.status === 'rejected').length;
-          MS.grid.logEvent(`Hold last frame: ${inputs.length - failed}/${inputs.length} sources`);
+          const changed = results.filter((r) => r.status === 'fulfilled' && r.value).length;
+          MS.grid.logEvent(`Hold last frame: ${changed} changed, ${inputs.length - changed - failed} already set${failed ? `, ${failed} failed` : ''}`);
         } catch (err) {
-          alert(`Couldn't update media sources in OBS.\n\n${err.message}`);
+          console.error('Hold frames failed:', err);
+          MS.grid.logEvent(`Hold frames failed: ${err.message}`);
         } finally {
           btn.disabled = !MS.connection.connected;
         }
