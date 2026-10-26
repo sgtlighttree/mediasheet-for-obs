@@ -762,6 +762,11 @@
         inputInfo.delete(inputName);
       }
 
+      function reset() {
+        inputInfo.clear();
+        scans.clear();
+      }
+
       MS.connection.obs.on('InputSettingsChanged', (d) => invalidate(d.inputName));
       MS.connection.obs.on('InputRemoved', (d) => invalidate(d.inputName));
       MS.connection.obs.on('InputNameChanged', (d) => invalidate(d.oldInputName));
@@ -769,6 +774,7 @@
       return {
         scan,
         invalidate,
+        reset,
         getScan: (sceneName) => scans.get(sceneName),
         isPlaylist: (sceneName) => !!scans.get(sceneName)?.detection.auto,
       };
@@ -1290,6 +1296,15 @@
 
           const currentSceneNames = new Set(scenes.map((s) => s.sceneName));
 
+          // A reconnect or OBS restart makes every cached scan stale
+          MS.playlists.reset();
+          for (const [name, tile] of tiles) {
+            if (!currentSceneNames.has(name)) continue;
+            const scan = await MS.playlists.scan(name).catch(() => null);
+            tile.isPlaylist = !!scan?.detection.auto;
+            if (tile.isPlaylist) tile.isMedia = false;
+          }
+
           // Remove tiles for scenes that no longer exist
           for (const [name] of tiles) {
             if (!currentSceneNames.has(name)) {
@@ -1649,7 +1664,9 @@
         title.textContent = `${sceneName} — ${scan.detection.auto ? scan.detection.kind + ' playlist' : 'sources'}`;
         row.appendChild(title);
 
-        const list = scan.detection.auto ? scan.detection.clips : scan.items;
+        const list = (scan.detection.auto ? scan.detection.clips : scan.items)
+          .slice()
+          .sort((a, b) => a.sceneItemId - b.sceneItemId);
         for (const item of list) {
           const c = buildClip(sceneName, item);
           clips.set(key(sceneName, item.sceneItemId), c);
@@ -1674,8 +1691,21 @@
           try {
             const scan = await MS.playlists.scan(sceneName);
             const tile = MS.grid.getTile(sceneName);
-            if (tile) tile.isPlaylist = !!scan.detection.auto;
-            render(sceneName);
+            if (tile) {
+              tile.isPlaylist = !!scan.detection.auto;
+              if (tile.isPlaylist) tile.isMedia = false;
+            }
+            // Re-ordering (a cue raises a layer) must not rebuild the row, or thumbnails flicker
+            const shown = (scan.detection.auto ? scan.detection.clips : scan.items).map((i) => String(i.sceneItemId));
+            const current = [...clips.keys()].filter((k) => k.startsWith(sceneName + '|')).map((k) => k.split('|')[1]);
+            const same = rows.has(sceneName) === showing(sceneName)
+              && shown.length === current.length
+              && shown.every((id) => current.includes(id));
+            if (!same) { render(sceneName); return; }
+            for (const item of scan.items) {
+              const c = clips.get(key(sceneName, item.sceneItemId));
+              if (c) { c.item = item; applyState(sceneName, c); }
+            }
           } catch {}
         }, 150));
       }
