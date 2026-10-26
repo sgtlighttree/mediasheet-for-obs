@@ -140,6 +140,8 @@
       grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
       gap: 8px;
       align-content: start;
+      /* Rows size to their content; otherwise a tall sub-grid makes the grid squeeze every tile row to fit */
+      grid-auto-rows: max-content;
     }
 
     /* === Tile === */
