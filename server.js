@@ -2,6 +2,7 @@ const express = require('express');
 const path = require('path');
 const { resolveFile } = require('./lib/resolve');
 const { readSceneDuplication } = require('./lib/obsconfig');
+const { createThumbService } = require('./lib/thumbs');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -11,12 +12,25 @@ function isLoopback(req) {
   return LOOPBACK.has(req.socket.remoteAddress);
 }
 
+const THUMB_CACHE_DIR = path.join(__dirname, 'cache', 'thumbs');
+const thumbs = createThumbService({ cacheDir: THUMB_CACHE_DIR });
+const THUMB_ERRORS = { 400: 'bad_path', 404: 'not_found', 415: 'unsupported_type', 503: 'unavailable' };
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/obs-config', async (req, res) => {
   if (!isLoopback(req)) return res.status(403).json({ error: 'forbidden' });
   res.json({ sceneDuplication: await readSceneDuplication() });
+});
+
+app.get('/api/thumb', async (req, res) => {
+  if (!isLoopback(req)) return res.status(403).json({ error: 'forbidden' });
+  const result = await thumbs.getThumbnail(typeof req.query.path === 'string' ? req.query.path : '');
+  if (result.status === 200) {
+    return res.sendFile(result.file, { root: THUMB_CACHE_DIR, maxAge: 60 * 1000 });
+  }
+  res.status(result.status).json({ error: THUMB_ERRORS[result.status] });
 });
 
 app.post('/api/resolve', async (req, res) => {
