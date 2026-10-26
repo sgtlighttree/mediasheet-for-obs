@@ -269,6 +269,80 @@
       cursor: pointer;
     }
 
+    /* === Playlist Sub-grid === */
+    .tile { position: relative; }
+    .btn-clips {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      background: rgba(0,0,0,0.6);
+      color: var(--ms-text);
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius-sm);
+      font-size: 10px;
+      padding: 1px 6px;
+      cursor: pointer;
+    }
+    .btn-clips.on { background: var(--ms-primary); border-color: var(--ms-primary-dark); }
+    .subgrid-row {
+      grid-column: 1 / -1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 6px;
+      background: var(--ms-bg-preview);
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius-lg);
+    }
+    .subgrid-title {
+      width: 100%;
+      font-size: 10px;
+      color: var(--ms-text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .clip-tile {
+      width: 128px;
+      background: var(--ms-bg-base);
+      border: 2px solid var(--ms-border);
+      border-radius: var(--ms-radius);
+      overflow: hidden;
+      user-select: none;
+      position: relative;
+    }
+    .clip-tile.cueable { cursor: pointer; }
+    .clip-tile.tally-pgm { border-color: var(--ms-tally-pgm); }
+    .clip-tile.tally-pvw { border-color: var(--ms-tally-pvw); }
+    .clip-badge {
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      font-size: 9px;
+      font-weight: 700;
+      padding: 0 4px;
+      border-radius: var(--ms-radius-sm);
+      background: rgba(0,0,0,0.7);
+    }
+    .clip-tile.tally-pgm .clip-badge { background: var(--ms-tally-pgm); }
+    .clip-tile.tally-pvw .clip-badge { background: var(--ms-tally-pvw); }
+    .clip-badge:empty { display: none; }
+    .clip-name {
+      padding: 2px 6px;
+      font-size: 10px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .clip-meter {
+      height: 3px;
+      background: var(--ms-bg-preview);
+    }
+    .clip-meter-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--ms-success);
+    }
+
     /* Author display rules (e.g. .modal-overlay flex) otherwise override the UA [hidden] style */
     [hidden] { display: none !important; }
 
@@ -1261,6 +1335,7 @@
 
           updateTally();
           startPolling();
+          if (MS.subgrid) MS.subgrid.renderAll();
           logEvent('Grid rebuilt');
         } catch (err) {
           console.error('Failed to rebuild grid:', err);
@@ -1439,6 +1514,210 @@
       document.addEventListener('click', hide);
 
       return { show, hide };
+    })();
+
+    // ===== Playlist Sub-grid =====
+    MS.subgrid = (() => {
+      const container = document.getElementById('tile-grid');
+      const rows = new Map(); // sceneName → row element
+      const clips = new Map(); // `${sceneName}|${sceneItemId}` → { el, badge, fill, item, active }
+      const meters = new Map(); // inputName → latest peak (linear)
+      const rescanTimers = new Map();
+      const key = (scene, id) => `${scene}|${id}`;
+
+      function showing(sceneName) {
+        const scan = MS.playlists.getScan(sceneName);
+        if (!scan || scan.items.length < 2) return false;
+        const pref = MS.store.get().subgrid[sceneName];
+        return pref === undefined ? scan.detection.auto : pref === true;
+      }
+
+      function thumbUrl(file) {
+        return `/api/thumb?path=${encodeURIComponent(file)}`;
+      }
+
+      function setThumb(thumbEl, file) {
+        if (!file) return;
+        const img = document.createElement('img');
+        img.onload = () => { thumbEl.innerHTML = ''; thumbEl.appendChild(img); };
+        img.src = thumbUrl(file);
+      }
+
+      function buildClip(sceneName, item) {
+        const el = document.createElement('div');
+        el.className = 'clip-tile';
+        el.dataset.scene = sceneName;
+        el.dataset.item = item.sceneItemId;
+
+        const thumb = document.createElement('div');
+        thumb.className = 'tile-thumbnail';
+        const fallback = document.createElement('span');
+        fallback.className = 'fallback-icon';
+        fallback.textContent = item.kind === 'image' ? '🖼' : '🎬';
+        thumb.appendChild(fallback);
+        setThumb(thumb, item.file);
+        el.appendChild(thumb);
+
+        const badge = document.createElement('div');
+        badge.className = 'clip-badge';
+        el.appendChild(badge);
+
+        const name = document.createElement('div');
+        name.className = 'clip-name';
+        name.textContent = item.sourceName;
+        name.title = item.sourceName;
+        el.appendChild(name);
+
+        const meter = document.createElement('div');
+        meter.className = 'clip-meter';
+        const fill = document.createElement('div');
+        fill.className = 'clip-meter-fill';
+        meter.appendChild(fill);
+        el.appendChild(meter);
+
+        return { el, badge, fill, thumb, item, active: false };
+      }
+
+      function applyState(sceneName, c) {
+        const state = c.active ? 'pgm' : c.item.enabled ? 'pvw' : 'idle';
+        c.el.classList.toggle('tally-pgm', state === 'pgm');
+        c.el.classList.toggle('tally-pvw', state === 'pvw');
+        c.badge.textContent = state === 'pgm' ? 'LIVE' : state === 'pvw' ? 'CUED' : '';
+        if (state !== 'pgm') c.fill.style.width = '0%';
+      }
+
+      function updateParentThumb(sceneName) {
+        const tile = MS.grid.getTile(sceneName);
+        const scan = MS.playlists.getScan(sceneName);
+        if (!tile || !scan || !tile.isPlaylist) return;
+        const live = scan.detection.clips.find((it) => clips.get(key(sceneName, it.sceneItemId))?.active);
+        const pick = live || scan.detection.clips[0];
+        if (pick?.file) setThumb(tile.el.querySelector('.tile-thumbnail'), pick.file);
+      }
+
+      async function refreshTally(sceneName) {
+        const scan = MS.playlists.getScan(sceneName);
+        if (!scan) return;
+        const actives = await Promise.all(scan.items.map((it) =>
+          MS.connection.obs.call('GetSourceActive', { sourceName: it.sourceName })
+            .then((r) => r.videoActive)
+            .catch(() => false)));
+        scan.items.forEach((it, i) => {
+          const c = clips.get(key(sceneName, it.sceneItemId));
+          if (c) { c.active = actives[i]; c.item = it; applyState(sceneName, c); }
+        });
+        updateParentThumb(sceneName);
+      }
+
+      function ensureToggle(sceneName) {
+        const tile = MS.grid.getTile(sceneName);
+        const scan = MS.playlists.getScan(sceneName);
+        if (!tile) return;
+        let btn = tile.el.querySelector('.btn-clips');
+        const eligible = !!scan && scan.items.length >= 2;
+        if (!eligible) { btn?.remove(); return; }
+        if (!btn) {
+          btn = document.createElement('button');
+          btn.className = 'btn-clips';
+          btn.textContent = 'clips';
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const next = !showing(sceneName);
+            await MS.store.update((d) => ({ ...d, subgrid: { ...d.subgrid, [sceneName]: next } }));
+            render(sceneName);
+          });
+          tile.el.querySelector('.tile-thumbnail').appendChild(btn);
+        }
+        btn.classList.toggle('on', showing(sceneName));
+      }
+
+      function render(sceneName) {
+        const tile = MS.grid.getTile(sceneName);
+        const scan = MS.playlists.getScan(sceneName);
+        rows.get(sceneName)?.remove();
+        rows.delete(sceneName);
+        for (const k of [...clips.keys()]) if (k.startsWith(sceneName + '|')) clips.delete(k);
+        if (!tile) return;
+        ensureToggle(sceneName);
+        if (!showing(sceneName)) return;
+
+        const row = document.createElement('div');
+        row.className = 'subgrid-row';
+        row.dataset.scene = sceneName;
+        const title = document.createElement('div');
+        title.className = 'subgrid-title';
+        title.textContent = `${sceneName} — ${scan.detection.auto ? scan.detection.kind + ' playlist' : 'sources'}`;
+        row.appendChild(title);
+
+        const list = scan.detection.auto ? scan.detection.clips : scan.items;
+        for (const item of list) {
+          const c = buildClip(sceneName, item);
+          clips.set(key(sceneName, item.sceneItemId), c);
+          row.appendChild(c.el);
+        }
+        tile.el.after(row);
+        rows.set(sceneName, row);
+        refreshTally(sceneName);
+      }
+
+      function renderAll() {
+        for (const [name, row] of rows) {
+          if (!MS.grid.getTile(name)) { row.remove(); rows.delete(name); }
+        }
+        for (const name of MS.grid.tiles.keys()) render(name);
+      }
+
+      function scheduleRescan(sceneName) {
+        clearTimeout(rescanTimers.get(sceneName));
+        rescanTimers.set(sceneName, setTimeout(async () => {
+          if (!MS.grid.getTile(sceneName)) return;
+          try {
+            const scan = await MS.playlists.scan(sceneName);
+            const tile = MS.grid.getTile(sceneName);
+            if (tile) tile.isPlaylist = !!scan.detection.auto;
+            render(sceneName);
+          } catch {}
+        }, 150));
+      }
+
+      const obs = MS.connection.obs;
+      obs.on('InputActiveStateChanged', (d) => {
+        for (const [k, c] of clips) {
+          if (c.item.sourceName !== d.inputName) continue;
+          c.active = d.videoActive;
+          applyState(k.split('|')[0], c);
+        }
+        for (const name of rows.keys()) updateParentThumb(name);
+      });
+      obs.on('SceneItemEnableStateChanged', (d) => {
+        const c = clips.get(key(d.sceneName, d.sceneItemId));
+        if (!c) return;
+        c.item.enabled = d.sceneItemEnabled;
+        applyState(d.sceneName, c);
+      });
+      for (const ev of ['SceneItemCreated', 'SceneItemRemoved', 'SceneItemListReindexed']) {
+        obs.on(ev, (d) => { if (MS.grid.getTile(d.sceneName)) scheduleRescan(d.sceneName); });
+      }
+      obs.on('InputVolumeMeters', (d) => {
+        for (const x of d.inputs) {
+          let peak = 0;
+          for (const ch of x.inputLevelsMul) peak = Math.max(peak, ch[1] || 0);
+          meters.set(x.inputName, peak);
+        }
+      });
+
+      function paintMeters() {
+        for (const c of clips.values()) {
+          if (!c.active) continue;
+          const peak = meters.get(c.item.sourceName) || 0;
+          const db = peak > 0 ? 20 * Math.log10(peak) : -60;
+          c.fill.style.width = Math.max(0, Math.min(100, ((db + 60) / 60) * 100)) + '%';
+        }
+        requestAnimationFrame(paintMeters);
+      }
+      requestAnimationFrame(paintMeters);
+
+      return { render, renderAll, refreshTally, clips, showing };
     })();
 
     // ===== File Import =====
