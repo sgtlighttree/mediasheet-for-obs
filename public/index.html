@@ -327,6 +327,63 @@
     .clip-tile.tally-pvw .clip-badge { background: var(--ms-tally-pvw); }
     .clip-badge:empty { display: none; }
     .clip-tile.cueing { opacity: 0.6; }
+    .audio-chip {
+      font-size: 11px;
+      padding: 1px 8px;
+      border-radius: 10px;
+      border: 1px solid var(--ms-border);
+      background: var(--ms-button-bg);
+      color: var(--ms-text);
+      cursor: pointer;
+    }
+    .audio-chip.ok { background: var(--ms-success); border-color: var(--ms-success); }
+    .audio-chip.warn { background: var(--ms-warning); border-color: var(--ms-warning); }
+    .audio-pop {
+      position: fixed;
+      top: 34px;
+      left: 8px;
+      z-index: 150;
+      max-width: 360px;
+      padding: 8px 10px;
+      font-size: 11px;
+      background: var(--ms-bg-base);
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius-lg);
+    }
+    .audio-pop li { margin: 3px 0 3px 14px; }
+    .audio-pop .small { color: var(--ms-text-muted); margin-top: 4px; }
+    .clip-route {
+      width: 100%;
+      font-size: 10px;
+      background: var(--ms-input-bg);
+      color: var(--ms-text);
+      border: none;
+      border-top: 1px solid var(--ms-border);
+      padding: 2px 4px;
+    }
+    .clip-route:disabled { opacity: 0.5; }
+    .clip-silent {
+      position: absolute;
+      bottom: 22px;
+      left: 3px;
+      font-size: 9px;
+      font-weight: 700;
+      padding: 0 4px;
+      border-radius: var(--ms-radius-sm);
+      background: var(--ms-danger);
+    }
+    .clip-silent:empty { display: none; }
+    .clip-add {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 80px;
+      font-size: 28px;
+      color: var(--ms-text-muted);
+      cursor: pointer;
+      border-style: dashed;
+    }
+    .clip-add:hover { color: var(--ms-text); border-color: var(--ms-primary-light); }
     .subgrid-head { width: 100%; display: flex; align-items: center; gap: 8px; }
     .subgrid-head .subgrid-title { width: auto; flex: 1; }
     .btn-manage {
@@ -506,7 +563,9 @@
       <span id="connection-dot" class="status-dot disconnected"></span>
       <span id="connection-text">Disconnected</span>
       <span id="server-status" class="server-status" hidden>Server offline</span>
+      <button id="audio-chip" class="audio-chip" hidden></button>
     </div>
+    <div id="audio-pop" class="audio-pop" hidden></div>
     <div class="top-bar-center">
       <button id="btn-add-input" class="btn" disabled>Add Input</button>
       <button id="btn-hold-frames" class="btn" disabled title="Make every media source in OBS hold its last frame instead of going black">Hold Frames</button>
@@ -552,6 +611,10 @@
           <input type="password" id="config-password" autocomplete="off" placeholder="(leave empty if none)">
           <button id="btn-toggle-password" class="btn btn-icon" type="button">👁</button>
         </div>
+      </label>
+      <label>
+        Expected FoH device (OBS Monitoring Device)
+        <input type="text" id="config-device" value="External Headphones" autocomplete="off">
       </label>
       <div class="modal-actions">
         <button id="btn-connect" class="btn btn-primary">Connect</button>
@@ -719,6 +782,7 @@
         return {
           managed: Array.isArray(v?.managed) ? v.managed : [],
           subgrid: v?.subgrid && typeof v.subgrid === 'object' ? v.subgrid : {},
+          streamOnly: Array.isArray(v?.streamOnly) ? v.streamOnly : [],
           expectedDevice: typeof v?.expectedDevice === 'string' && v.expectedDevice
             ? v.expectedDevice
             : DEFAULT_DEVICE,
@@ -875,6 +939,7 @@
       // Build scene grid (Task 5)
       if (MS.grid) await MS.grid.rebuild();
       if (MS.manager) MS.manager.onConnect().catch((err) => console.error('Manager init failed:', err));
+      if (MS.audioCheck) MS.audioCheck.run().catch(() => {});
     }
 
     function onDisconnected() {
@@ -897,12 +962,14 @@
       const btnDisconnect = document.getElementById('btn-disconnect');
       const btnClose = document.getElementById('btn-config-close');
       const btnToggle = document.getElementById('btn-toggle-password');
+      const deviceInput = document.getElementById('config-device');
 
       function show(focusPassword) {
         const cfg = MS.connection.getConfig();
         hostInput.value = cfg.host || 'localhost';
         portInput.value = cfg.port || 4455;
         passInput.value = cfg.password || '';
+        deviceInput.value = MS.store.get().expectedDevice;
         btnConnect.hidden = MS.connection.connected;
         btnDisconnect.hidden = !MS.connection.connected;
         overlay.hidden = false;
@@ -921,6 +988,8 @@
         const host = hostInput.value.trim();
         const port = parseInt(portInput.value, 10);
         const password = passInput.value;
+        const device = deviceInput.value.trim() || 'External Headphones';
+        MS.store.update((d) => ({ ...d, expectedDevice: device })).then(() => MS.audioCheck?.run());
         hide();
         MS.connection.connect(host, port, password);
       });
@@ -1627,8 +1696,12 @@
         });
         el.appendChild(restart);
 
-        el.classList.add('cueable');
-        el.addEventListener('click', () => MS.cue.cueClip(sceneName, item));
+        // Toggled (non-playlist) sub-grids are read-only: cueing there would switch off a camera behind an overlay
+        const cueable = !!MS.playlists.getScan(sceneName)?.detection.auto;
+        if (cueable) {
+          el.classList.add('cueable');
+          el.addEventListener('click', () => MS.cue.cueClip(sceneName, item));
+        }
 
         const name = document.createElement('div');
         name.className = 'clip-name';
@@ -1643,7 +1716,27 @@
         meter.appendChild(fill);
         el.appendChild(meter);
 
-        return { el, badge, fill, thumb, restart, item, active: false };
+        const silent = document.createElement('div');
+        silent.className = 'clip-silent';
+        el.appendChild(silent);
+
+        let route = null;
+        if (cueable && item.kind === 'video') {
+          route = document.createElement('select');
+          route.className = 'clip-route';
+          for (const [v, label] of [['both', 'Room + stream'], ['room', 'Room only'], ['stream', 'Stream only']]) {
+            const o = document.createElement('option');
+            o.value = v;
+            o.textContent = label;
+            route.appendChild(o);
+          }
+          route.addEventListener('click', (e) => e.stopPropagation());
+          route.addEventListener('change', () => setRoute(c, route.value));
+          el.appendChild(route);
+        }
+
+        const c = { el, badge, fill, thumb, restart, route, silent, item, active: false };
+        return c;
       }
 
       function applyState(sceneName, c) {
@@ -1652,6 +1745,8 @@
         c.el.classList.toggle('tally-pvw', state === 'pvw');
         c.badge.textContent = state === 'pgm' ? 'LIVE' : state === 'pvw' ? 'CUED' : '';
         c.restart.hidden = !(state === 'pgm' && c.item.kind === 'video');
+        if (c.route) c.route.disabled = c.active;
+        if (c.route) c.route.title = c.active ? 'Live clip: route is locked while on Program' : 'Where this clip\'s sound goes';
         if (state !== 'pgm') c.fill.style.width = '0%';
       }
 
@@ -1662,6 +1757,44 @@
         const live = scan.detection.clips.find((it) => clips.get(key(sceneName, it.sceneItemId))?.active);
         const pick = live || scan.detection.clips[0];
         if (pick?.file) setThumb(tile.el.querySelector('.tile-thumbnail'), pick.file);
+      }
+
+      function paintRoute(c, route) {
+        if (!c.route) return;
+        c.route.value = route;
+        c.silent.textContent = route === 'stream' ? 'SILENT IN ROOM' : '';
+      }
+
+      async function loadRoute(c) {
+        if (!c.route) return;
+        try {
+          const { monitorType } = await MS.connection.obs.call('GetInputAudioMonitorType', { inputName: c.item.sourceName });
+          let route = window.MSPlaylist.monitorTypeToRoute(monitorType);
+          // A clip at None that was never chosen as Stream only gets Room + stream when it is cued or goes live
+          if (route === 'stream' && !MS.store.get().streamOnly.includes(c.item.sourceName)) route = 'both';
+          paintRoute(c, route);
+        } catch {}
+      }
+
+      async function setRoute(c, route) {
+        if (c.active) { loadRoute(c); return; }
+        const name = c.item.sourceName;
+        try {
+          await MS.connection.obs.call('SetInputAudioMonitorType', {
+            inputName: name,
+            monitorType: window.MSPlaylist.routeToMonitorType(route),
+          });
+          await MS.store.update((d) => ({
+            ...d,
+            streamOnly: route === 'stream'
+              ? [...new Set([...d.streamOnly, name])]
+              : d.streamOnly.filter((n) => n !== name),
+          }));
+          paintRoute(c, route);
+        } catch (err) {
+          MS.grid.logEvent(`Route change failed: ${err.message}`);
+          loadRoute(c);
+        }
       }
 
       async function refreshTally(sceneName) {
@@ -1770,8 +1903,17 @@
           clips.set(key(sceneName, item.sceneItemId), c);
           row.appendChild(c.el);
         }
+        if (scan.detection.auto && scan.detection.kind === 'video') {
+          const add = document.createElement('div');
+          add.className = 'clip-tile clip-add cueable';
+          add.textContent = '+';
+          add.title = 'Import a clip into this scene';
+          add.addEventListener('click', () => MS.subgrid.importInto(sceneName));
+          row.appendChild(add);
+        }
         tile.el.after(row);
         rows.set(sceneName, row);
+        for (const [k, c] of clips) if (k.startsWith(sceneName + '|')) loadRoute(c);
         refreshTally(sceneName);
       }
 
@@ -1813,6 +1955,9 @@
         c.item.enabled = d.sceneItemEnabled;
         applyState(d.sceneName, c);
       });
+      obs.on('InputAudioMonitorTypeChanged', (d) => {
+        for (const c of clips.values()) if (c.item.sourceName === d.inputName) loadRoute(c);
+      });
       for (const ev of ['SceneItemCreated', 'SceneItemRemoved', 'SceneItemListReindexed']) {
         obs.on(ev, (d) => { if (MS.grid.getTile(d.sceneName)) scheduleRescan(d.sceneName); });
       }
@@ -1835,7 +1980,23 @@
       }
       requestAnimationFrame(paintMeters);
 
-      return { render, renderAll, refreshTally, clips, showing };
+      const picker = document.createElement('input');
+      picker.type = 'file';
+      picker.accept = 'video/*';
+      picker.hidden = true;
+      document.body.appendChild(picker);
+      let importTarget = null;
+      picker.addEventListener('change', async () => {
+        const file = picker.files[0];
+        picker.value = '';
+        if (file && importTarget) await MS.fileImport.importFile(file, importTarget);
+      });
+      function importInto(sceneName) {
+        importTarget = sceneName;
+        picker.click();
+      }
+
+      return { render, renderAll, refreshTally, clips, showing, importInto };
     })();
 
     // ===== In-page Confirm =====
@@ -1870,7 +2031,8 @@
       const P = window.MSPlaylist;
       const RESTART = 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART';
       const PAUSE = 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE';
-      const streamOnlyChosen = new Set();
+      // Lives in OBS so every MediaSheet client agrees: a second client must not flip a Stream-only clip back on at take.
+      const streamOnlyChosen = { has: (name) => MS.store.get().streamOnly.includes(name) };
       let busy = false;
       let sawTransitionEnd = false;
 
@@ -1956,7 +2118,7 @@
           for (const r of reqs) await obs.call(r.request, r.data);
           if (item.kind === 'video' && !active.has(item.sourceName)) await primeFirstFrame(item.sourceName);
 
-          if (!MS.store.get().managed.includes(sceneName)) {
+          if (scan.detection.auto && !MS.store.get().managed.includes(sceneName)) {
             await MS.manager.setManaged(sceneName, true);
           }
           MS.grid.logEvent(`Cued: ${item.sourceName}`);
@@ -2227,7 +2389,7 @@
         await importFile(file);
       });
 
-      async function importFile(file) {
+      async function importFile(file, targetScene = null) {
         const { name, size, lastModified } = file;
 
         let resolveResult;
@@ -2260,7 +2422,7 @@
           if (!filePath) return;
         }
 
-        await createOBSInput(name, filePath);
+        await createOBSInput(name, filePath, targetScene);
       }
 
       function showPicker(filename, matches) {
@@ -2298,8 +2460,50 @@
         });
       }
 
-      async function createOBSInput(filename, filePath) {
+      async function createOBSInput(filename, filePath, targetScene = null) {
         const obs = MS.connection.obs;
+
+        if (targetScene) {
+          try {
+            const { inputs } = await obs.call('GetInputList');
+            const taken = new Set(inputs.map((i) => i.inputName));
+            let inputName = filename;
+            for (let n = 2; taken.has(inputName); n++) inputName = `${filename} (${n})`;
+            // Eye off: a new clip must not appear cued, and nothing in the scene changes until the operator cues it
+            const { sceneItemId } = await obs.call('CreateInput', {
+              sceneName: targetScene,
+              inputName,
+              inputKind: 'ffmpeg_source',
+              inputSettings: {
+                local_file: filePath,
+                is_local_file: true,
+                restart_on_activate: true,
+                close_when_inactive: false,
+                clear_on_media_end: false,
+              },
+              sceneItemEnabled: false,
+            });
+            await obs.call('SetSceneItemTransform', {
+              sceneName: targetScene,
+              sceneItemId,
+              sceneItemTransform: {
+                boundsType: 'OBS_BOUNDS_SCALE_INNER',
+                boundsWidth: MS.canvas.width,
+                boundsHeight: MS.canvas.height,
+                boundsAlignment: 0,
+              },
+            });
+            await obs.call('SetInputAudioMonitorType', {
+              inputName,
+              monitorType: window.MSPlaylist.routeToMonitorType('both'),
+            });
+            MS.grid.logEvent(`Added to ${targetScene}: ${filename}`);
+          } catch (err) {
+            MS.grid.logEvent(`Import failed: ${err.message}`);
+            console.error('Import into scene failed:', err);
+          }
+          return;
+        }
 
         let sceneName = `[MS] ${filename}`;
         let inputName = sceneName;
@@ -2329,7 +2533,7 @@
             inputSettings: {
               local_file: filePath,
               is_local_file: true,
-              restart_on_activate: false,
+              restart_on_activate: true,
               close_when_inactive: false,
               clear_on_media_end: false,
             },
@@ -2370,6 +2574,62 @@
       // Auto-connect
       const cfg = MS.connection.getConfig();
       MS.connection.connect(cfg.host || 'localhost', cfg.port || 4455, cfg.password || '');
+    })();
+
+    // ===== Audio Config Check =====
+    // Warns, never blocks: a wrong monitoring device means the room hears the wrong thing.
+    MS.audioCheck = (() => {
+      const chip = document.getElementById('audio-chip');
+      const pop = document.getElementById('audio-pop');
+
+      async function run() {
+        if (!MS.connection.connected) { chip.hidden = true; return; }
+        const obs = MS.connection.obs;
+        const issues = [];
+        const expected = MS.store.get().expectedDevice;
+        try {
+          const { parameterValue } = await obs.call('GetProfileParameter', { parameterCategory: 'Audio', parameterName: 'MonitoringDeviceName' });
+          const device = parameterValue ?? 'Default';
+          if (device === 'Default') {
+            issues.push(`Monitoring Device is Default (follows whatever macOS output is active); expected "${expected}".`);
+          } else if (device !== expected) {
+            issues.push(`Monitoring Device is "${device}", expected "${expected}".`);
+          }
+        } catch {
+          issues.push('Could not read the Monitoring Device from OBS.');
+        }
+        try {
+          const special = await obs.call('GetSpecialInputs');
+          if (special.desktop1 || special.desktop2) {
+            issues.push('Desktop Audio is enabled: it captures system audio, including anything you preview on the Mac.');
+          }
+        } catch {}
+        let dup = 'unknown';
+        try { dup = (await (await fetch('/api/obs-config')).json()).sceneDuplication; } catch {}
+        if (dup === 'false') issues.push('Duplicate Scene is off (per saved OBS config): cueing a scene on Program changes it live.');
+        else if (dup !== 'true') issues.push('Can\'t read Duplicate Scene. Restart `npm start` (the server needs the update), then reload this dock.');
+
+        chip.hidden = false;
+        chip.className = 'audio-chip ' + (issues.length ? 'warn' : 'ok');
+        chip.textContent = issues.length ? `Audio ⚠ ${issues.length}` : 'Audio ✓';
+        pop.innerHTML = '';
+        const ul = document.createElement('ul');
+        for (const text of issues.length ? issues : [`Monitoring Device "${expected}", Desktop Audio off, Duplicate Scene on.`]) {
+          const li = document.createElement('li');
+          li.textContent = text;
+          ul.appendChild(li);
+        }
+        const note = document.createElement('div');
+        note.className = 'small';
+        note.textContent = 'Per saved OBS config. Warnings never block a take.';
+        pop.append(ul, note);
+      }
+
+      chip.addEventListener('click', () => { pop.hidden = !pop.hidden; });
+      document.addEventListener('click', (e) => { if (e.target !== chip && !pop.contains(e.target)) pop.hidden = true; });
+      setInterval(() => { run().catch(() => {}); }, 15000);
+
+      return { run };
     })();
 
     // ===== Hold Last Frame =====

@@ -290,6 +290,12 @@ describe('planActivate', () => {
     monitorSwitchSafe: true,
   };
 
+  it('only unmutes a muted video whose monitor type is already Room + stream', () => {
+    assert.deepEqual(planActivate({ ...base, muted: true }), [
+      { request: 'SetInputMute', data: { inputName: 'A', inputMuted: false } },
+    ]);
+  });
+
   it('unmutes a muted video and switches Stream only to Room + stream', () => {
     assert.deepEqual(planActivate({ ...base, muted: true, monitorType: MON_NONE }), [
       { request: 'SetInputMute', data: { inputName: 'A', inputMuted: false } },
