@@ -398,6 +398,7 @@
     </div>
     <div class="top-bar-center">
       <button id="btn-add-input" class="btn" disabled>Add Input</button>
+      <button id="btn-hold-frames" class="btn" disabled title="Make every media source in OBS hold its last frame instead of going black">Hold Frames</button>
       <input type="file" id="file-input" accept="video/*,audio/*,image/*" hidden>
     </div>
     <div class="top-bar-right">
@@ -637,6 +638,7 @@
 
       // Enable UI buttons
       document.getElementById('btn-add-input').disabled = false;
+      document.getElementById('btn-hold-frames').disabled = false;
       document.getElementById('btn-cut').disabled = false;
       document.getElementById('btn-fade').disabled = false;
 
@@ -646,6 +648,7 @@
 
     function onDisconnected() {
       document.getElementById('btn-add-input').disabled = true;
+      document.getElementById('btn-hold-frames').disabled = true;
       document.getElementById('btn-cut').disabled = true;
       document.getElementById('btn-fade').disabled = true;
     }
@@ -1443,6 +1446,7 @@
               is_local_file: true,
               restart_on_activate: false,
               close_when_inactive: false,
+              clear_on_media_end: false,
             },
             sceneItemEnabled: true,
           });
@@ -1481,6 +1485,34 @@
       // Auto-connect
       const cfg = MS.connection.getConfig();
       MS.connection.connect(cfg.host || 'localhost', cfg.port || 4455, cfg.password || '');
+    })();
+
+    // ===== Hold Last Frame =====
+    // OBS clears a media source to black when playback ends unless clear_on_media_end is false.
+    // Patches every ffmpeg_source in OBS, including ones MediaSheet didn't import.
+    MS.holdFrames = (() => {
+      const btn = document.getElementById('btn-hold-frames');
+
+      btn.addEventListener('click', async () => {
+        const obs = MS.connection.obs;
+        btn.disabled = true;
+        try {
+          const { inputs } = await obs.call('GetInputList', { inputKind: 'ffmpeg_source' });
+          const results = await Promise.allSettled(inputs.map((input) =>
+            obs.call('SetInputSettings', {
+              inputName: input.inputName,
+              inputSettings: { clear_on_media_end: false },
+              overlay: true,
+            })
+          ));
+          const failed = results.filter((r) => r.status === 'rejected').length;
+          MS.grid.logEvent(`Hold last frame: ${inputs.length - failed}/${inputs.length} sources`);
+        } catch (err) {
+          alert(`Couldn't update media sources in OBS.\n\n${err.message}`);
+        } finally {
+          btn.disabled = !MS.connection.connected;
+        }
+      });
     })();
 
     // ===== Server Health Check =====
