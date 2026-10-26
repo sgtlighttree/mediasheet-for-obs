@@ -110,3 +110,23 @@ MediaSheet stores connection settings in `localStorage` with `ms_` prefix:
 ## License
 
 MIT
+
+## Playlist sub-grid
+
+A scene with **2+ videos or 2+ images** gets a sub-grid under its tile (other multi-source scenes get a `clips` toggle, read-only). Click a clip to **cue** it to Preview (first frame, silent, nothing on Program changes); **CUT/FADE** (MediaSheet or OBS buttons) takes it from 0:00. Each clip tile shows its state (`CUED`/`LIVE`), a live level meter, and a route control: **Room + stream**, **Room only**, **Stream only** (red `SILENT IN ROOM`). The `+` tile imports a clip straight into that scene. **Manage** (or cueing a clip) lets MediaSheet reset idle clips, mute clips that leave Program, and apply hold-frame/restart-on-activate.
+
+### One-time OBS setup for live use
+
+- **Duplicate Scene** on (Studio Mode → Transition ⋮ menu). Without it, cueing a scene that is on Program changes Program live; MediaSheet asks you to confirm.
+- **Monitoring Device** = your FoH output (default expectation: `External Headphones`, editable in the OBS Connection dialog). With that, the headphone icon means "to the room".
+- **Desktop Audio** disabled (it captures system audio, including anything you preview on the Mac).
+- The **Audio** chip in the top bar shows whether these hold. It warns and never blocks a take.
+- Keep macOS's default output on your own listening device; only OBS's Monitoring Device needs to point at FoH.
+
+### Requirements and notes
+
+- Thumbnails need `ffmpeg` (Homebrew: `/opt/homebrew/bin/ffmpeg`). Without it tiles show icons. Thumbnails are cached in `cache/thumbs/`, so they survive an ejected drive.
+- `/api/thumb` and `/api/obs-config` answer **localhost only**; the dock URL must be `http://localhost:3001` (a remote tablet will not get thumbnails).
+- After updating, restart `npm start` and reload the dock.
+- MediaSheet stores its small settings (managed scenes, sub-grid toggles, Stream-only clips, expected device) in OBS persistent data (slot `mediasheet`), so the dock and a browser tab agree.
+
