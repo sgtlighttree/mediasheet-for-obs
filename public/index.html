@@ -1459,7 +1459,9 @@
     // OBS's restart drops the current frame and shows ~2 black frames. Doing it while the incoming clip is still only in Preview keeps the blank off Program: the clip is restarted, given a moment to draw, and goes live already playing.
     MS.preroll = (() => {
       const STARTED_TIMEOUT_MS = 800;
-      const SETTLE_MS = 150;
+      // How long OBS's restart blank lasts after PlaybackStarted (measured, 25 runs per start state): paused <= 49 ms, stopped/ended <= 22 ms, already playing <= 103 ms (p90 56). Settle = worst case + margin; rare outliers (about 1 in 100 runs) can still blink, trading against a longer trim.
+      const SETTLE_MS = 100;
+      const SETTLE_PLAYING_MS = 140;
       const WINDOW_MS = 3000;
       const recent = new Map(); // inputName → when it was pre-rolled
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1488,12 +1490,15 @@
           const { candidates } = await MS.audioFade.gather();
           const targets = candidates.filter((c) => !c.live && c.enabledInPreview);
           if (!targets.length) return [];
+          let settle = SETTLE_MS;
           await Promise.all(targets.map(async (c) => {
             // Silent while it plays unseen; the activation handler unmutes it when it goes live
             await MS.connection.obs.call('SetInputMute', { inputName: c.sourceName, inputMuted: true });
+            const { mediaState } = await MS.connection.obs.call('GetMediaInputStatus', { inputName: c.sourceName });
+            if (mediaState === 'OBS_MEDIA_STATE_PLAYING') settle = SETTLE_PLAYING_MS;
             if (await restartAndWait(c.sourceName)) recent.set(c.sourceName, Date.now());
           }));
-          await sleep(SETTLE_MS);
+          await sleep(settle);
           return targets.map((c) => c.sourceName);
         } catch (err) {
           console.error('Pre-roll failed:', err);
@@ -1502,7 +1507,7 @@
       }
 
       // Typical run() time (gather, mute, restart, first frame, settle); a CUT starts it this long before the fade-out ends so the clip is only just playing when it goes live
-      const LEAD_MS = 300;
+      const LEAD_MS = 150;
 
       return { run, LEAD_MS, was: (inputName) => Date.now() - (recent.get(inputName) ?? -Infinity) < WINDOW_MS };
     })();
