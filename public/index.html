@@ -225,6 +225,12 @@
     .pl-menu-title { font-weight: 700; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .pl-menu label { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
     .pl-menu select { margin-left: auto; background: var(--ms-bg-base); color: inherit; border: 1px solid var(--ms-border); border-radius: var(--ms-radius-sm); height: 24px; }
+    .pl-colorrow { display: flex; align-items: center; gap: 8px; margin: 8px 0 2px; }
+    .pl-swatches { display: flex; gap: 6px; margin-left: auto; }
+    .pl-swatch { width: 20px; height: 20px; padding: 0; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
+    .pl-swatch.on { border-color: #fff; }
+    .pl-swatch.auto { width: auto; padding: 0 8px; border-radius: 10px; background: var(--ms-bg-base); border-color: var(--ms-border); color: inherit; font-size: 11px; }
+    .pl-swatch.auto.on { border-color: #fff; }
     .pl-menu .pl-note { margin: 8px 0 0; color: var(--ms-text-muted); line-height: 1.35; }
     .pl-menu .pl-msg { margin: 8px 0 0; color: #E8B93A; line-height: 1.35; }
 
@@ -1113,6 +1119,8 @@
             autoplay: o?.autoplay === true,
             // Playback lock: while this playlist is live on Program, MediaSheet ignores presses on other scenes, clips and the transition buttons
             lock: o?.lock === true,
+            // Chosen box/tile color ('' = automatic, from the scene name)
+            color: typeof o?.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(o.color) ? o.color : '',
             loop: o?.loop !== false,
             transition: ['cut', 'fade', 'stinger'].includes(o?.transition) ? o.transition : 'fade',
           }])),
@@ -2867,7 +2875,7 @@
         const playlist = !!scan?.detection.auto;
         const row = rows.get(sceneName);
         const collapsed = isCollapsed(sceneName);
-        const color = playlist ? colorFor(sceneName) : '#5A5F70';
+        const color = playlist ? (MS.store.get().playlistOptions[sceneName]?.color || colorFor(sceneName)) : '#5A5F70';
         const tint = tintOf(color, 0.16);
         if (row) row.hidden = collapsed;
         tile.el.classList.toggle('pl', playlist || !!row);
@@ -3119,7 +3127,7 @@
             });
             tile.el.appendChild(chev); // not the thumbnail: its picture is replaced when a clip thumbnail loads
           }
-          if (scan.detection.kind === 'video' && !tile.el.dataset.plMenu) {
+          if (!tile.el.dataset.plMenu) {
             tile.el.dataset.plMenu = '1';
             tile.el.addEventListener('contextmenu', (e) => {
               e.preventDefault();
@@ -3257,10 +3265,12 @@
           autoTag.textContent = 'AUTO';
           autoTag.hidden = !MS.store.get().playlistOptions[sceneName]?.autoplay;
           head.appendChild(autoTag);
+        }
+        if (scan.detection.auto) {
           const options = document.createElement('button');
           options.className = 'btn-manage';
           options.textContent = 'Options';
-          options.title = 'Autoplay, loop and the transition between clips';
+          options.title = scan.detection.kind === 'video' ? 'Autoplay, loop, transition and color' : 'Color';
           options.addEventListener('click', (e) => { e.stopPropagation(); MS.playlistMenu.open(sceneName, options); });
           head.appendChild(options);
         }
@@ -3389,7 +3399,7 @@
         picker.click();
       }
 
-      return { render, renderAll, refreshTally, clips, showing, importInto, expand, paintStrip, paintAuto };
+      return { render, renderAll, refreshTally, clips, showing, importInto, expand, paintStrip, paintAuto, decorate, palette: PALETTE, colorFor };
     })();
 
     // ===== In-page Confirm =====
@@ -3860,7 +3870,7 @@
       let leaseTimer = null;
 
       const obs = () => MS.connection.obs;
-      const defaults = { autoplay: false, lock: false, loop: true, transition: 'fade' };
+      const defaults = { autoplay: false, lock: false, color: '', loop: true, transition: 'fade' };
       const opts = (scene) => MS.store.get().playlistOptions[scene] ?? defaults;
       const isArmed = (scene) => !!MS.store.get().playlistOptions[scene]?.autoplay;
       const armedScenes = () => Object.entries(MS.store.get().playlistOptions).filter(([, o]) => o.autoplay).map(([s]) => s);
@@ -4150,6 +4160,7 @@
         // Turning autoplay on or off starts from a clean slate (no stale hold or cue)
         if ('autoplay' in patch) { reset(scene); states.delete(scene); }
         MS.subgrid.paintAuto(scene);
+        if ('color' in patch) MS.subgrid.decorate(scene);
         paintLock();
         return { ok: true };
       }
@@ -4222,7 +4233,37 @@
         note.className = 'pl-note';
         note.textContent = 'Plays the clips in the order shown, only while this playlist is on Program. Pause the live clip to hold. If you cue or take something by hand, autoplay stands down until your take lands. Playback lock ignores those presses instead (OBS\'s own buttons still work; autoplay puts its cue back). It runs in this dock: keep the dock open and the Mac awake.';
 
-        menu.append(title, row('Autoplay (set and forget)', autoBox), row('Playback lock (ignore other presses while live)', lockBox), row('Loop the playlist', loopBox), selLabel, msg, note);
+        // Color: automatic (from the scene name) or one of the palette colors
+        const swatches = document.createElement('div');
+        swatches.className = 'pl-swatches';
+        const paintSwatches = () => {
+          const chosen = MS.autoplay.opts(sceneName).color;
+          for (const b of swatches.children) b.classList.toggle('on', (b.dataset.color || '') === chosen);
+        };
+        const swatch = (color, label) => {
+          const b = document.createElement('button');
+          b.className = 'pl-swatch' + (color ? '' : ' auto');
+          b.dataset.color = color;
+          b.title = color ? `Color ${color}` : 'Automatic (from the scene name)';
+          b.textContent = color ? '' : 'Auto';
+          if (color) b.style.background = color;
+          b.addEventListener('click', async () => { await apply({ color }); paintSwatches(); });
+          return b;
+        };
+        swatches.append(swatch('', 'Auto'), ...MS.subgrid.palette.map((c) => swatch(c)));
+        const colorLabel = document.createElement('div');
+        colorLabel.className = 'pl-colorrow';
+        colorLabel.append(document.createTextNode('Color'), swatches);
+        paintSwatches();
+
+        const isVideo = MS.playlists.getScan(sceneName)?.detection.kind === 'video';
+        if (isVideo) {
+          menu.append(title, row('Autoplay (set and forget)', autoBox), row('Playback lock (ignore other presses while live)', lockBox), row('Loop the playlist', loopBox), selLabel, colorLabel, msg, note);
+        } else {
+          // Image playlists: autoplay, lock and transitions are for video clips only
+          note.textContent = 'Autoplay, loop and transitions apply to video playlists. Slideshow timing is a setting of the OBS source.';
+          menu.append(title, colorLabel, msg, note);
+        }
         document.body.appendChild(menu);
         const r = at instanceof Element ? at.getBoundingClientRect() : { left: at.x, bottom: at.y };
         const w = menu.offsetWidth;
