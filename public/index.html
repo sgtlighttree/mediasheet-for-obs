@@ -507,22 +507,26 @@
       width: 24px;
       height: 24px;
       padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
       background: rgba(0,0,0,0.65);
       border: 1px solid rgba(255,255,255,0.35);
       border-radius: var(--ms-radius);
       cursor: pointer;
     }
     .btn-collapse:hover { background: rgba(0,0,0,0.85); border-color: #fff; }
+    /* The glyph is a V (a rotated square's two borders): its visual centre sits a little past the square's centre, so each state nudges it back (offsets measured at 10x: pixel centroid vs button centre) */
     .btn-collapse span {
       display: block;
       width: 7px;
       height: 7px;
-      margin: 5px auto 0;
+      margin: 0;
       border-right: 2px solid #fff;
       border-bottom: 2px solid #fff;
-      transform: rotate(45deg);
+      transform: translate(-0.45px, -2px) rotate(45deg);
     }
-    .tile.pl-collapsed .btn-collapse span { transform: rotate(-45deg); margin-left: 8px; }
+    .tile.pl-collapsed .btn-collapse span { transform: translate(-2px, -0.45px) rotate(-45deg); }
     .tile.pl.tally-pvw .tile-label::before { background: #5CD46A; }
     .subgrid-title {
       width: 100%;
