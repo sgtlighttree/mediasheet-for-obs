@@ -617,6 +617,10 @@
         Expected FoH device (OBS Monitoring Device)
         <input type="text" id="config-device" value="External Headphones" autocomplete="off">
       </label>
+      <label>
+        Clip audio fade (ms, 0 = off)
+        <input type="number" id="config-audio-fade" value="400" min="0" max="3000" step="50">
+      </label>
       <div class="modal-actions">
         <button id="btn-connect" class="btn btn-primary">Connect</button>
         <button id="btn-disconnect" class="btn" hidden>Disconnect</button>
@@ -795,6 +799,10 @@
           expectedDevice: typeof v?.expectedDevice === 'string' && v.expectedDevice
             ? v.expectedDevice
             : DEFAULT_DEVICE,
+          audioFadeMs: Number.isFinite(v?.audioFadeMs) && v.audioFadeMs >= 0 ? Math.min(v.audioFadeMs, 3000) : 400,
+          fadeRestore: v?.fadeRestore && typeof v.fadeRestore === 'object'
+            ? Object.fromEntries(Object.entries(v.fadeRestore).filter(([, n]) => typeof n === 'number'))
+            : {},
         };
       }
 
@@ -954,6 +962,7 @@
       if (MS.grid) await MS.grid.rebuild();
       if (MS.manager) MS.manager.onConnect().catch((err) => console.error('Manager init failed:', err));
       if (MS.audioCheck) MS.audioCheck.run().catch(() => {});
+      MS.audioFade.recover().catch(() => {});
     }
 
     function onDisconnected() {
@@ -977,6 +986,7 @@
       const btnClose = document.getElementById('btn-config-close');
       const btnToggle = document.getElementById('btn-toggle-password');
       const deviceInput = document.getElementById('config-device');
+      const audioFadeInput = document.getElementById('config-audio-fade');
 
       function show(focusPassword) {
         const cfg = MS.connection.getConfig();
@@ -984,6 +994,7 @@
         portInput.value = cfg.port || 4455;
         passInput.value = cfg.password || '';
         deviceInput.value = MS.store.get().expectedDevice;
+        audioFadeInput.value = MS.store.get().audioFadeMs;
         btnConnect.hidden = MS.connection.connected;
         btnDisconnect.hidden = !MS.connection.connected;
         overlay.hidden = false;
@@ -1011,6 +1022,11 @@
       btnDisconnect.addEventListener('click', () => {
         hide();
         MS.connection.disconnect();
+      });
+
+      audioFadeInput.addEventListener('change', () => {
+        const ms = Math.max(0, Math.min(3000, parseInt(audioFadeInput.value, 10) || 0));
+        MS.store.update((d) => ({ ...d, audioFadeMs: ms }));
       });
 
       btnClose.addEventListener('click', hide);
@@ -1113,6 +1129,139 @@
 
       return { toggleMute, setVolume, loadInitialState };
     })();
+
+    // ===== Clip Audio Fades =====
+    // A clip fading out is left parked at volume 0 (its real level is remembered in the store) and fades up to that level the next time it goes live, so nothing depends on whether OBS still processes a clip that is playing but not live.
+    MS.audioFade = (() => {
+      const P = window.MSPlaylist;
+      const TICK_MS = 30;
+      const PREPARE_TIMEOUT_MS = 1500;
+      const ramps = new Map(); // inputName → id of the ramp that owns its volume
+      let rampSeq = 0;
+      let nextInMs = null; // a MediaSheet take sets this so the fade-in matches the transition
+
+      const obs = () => MS.connection.obs;
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const setMul = (inputName, mul) =>
+        obs().call('SetInputVolume', { inputName, inputVolumeMul: Math.max(0, Math.min(20, mul)) });
+
+      async function ramp(entries, ms) {
+        const id = ++rampSeq;
+        for (const e of entries) ramps.set(e.name, id);
+        const start = performance.now();
+        for (;;) {
+          const t = ms > 0 ? (performance.now() - start) / ms : 1;
+          const mine = entries.filter((e) => ramps.get(e.name) === id);
+          if (!mine.length) return false;
+          await Promise.all(mine.map((e) => setMul(e.name, P.rampValue(e.from, e.to, t)).catch(() => {})));
+          if (t >= 1) break;
+          await sleep(TICK_MS);
+        }
+        for (const e of entries) if (ramps.get(e.name) === id) ramps.delete(e.name);
+        return true;
+      }
+
+      async function gather() {
+        const pgm = MS.grid.currentPgm;
+        const pvw = MS.grid.currentPvw;
+        const names = [...new Set([pgm, pvw].filter(Boolean))];
+        const scans = await Promise.all(names.map((n) => MS.playlists.scan(n).catch(() => null)));
+        const previewScan = scans[names.indexOf(pvw)];
+        const enabledInPreview = new Set((previewScan?.items ?? []).filter((i) => i.enabled).map((i) => i.sourceName));
+        const videos = new Set();
+        for (const sc of scans) for (const i of sc?.items ?? []) if (i.kind === 'video') videos.add(i.sourceName);
+        const remembered = MS.store.get().fadeRestore;
+        const candidates = await Promise.all([...videos].map(async (sourceName) => {
+          const [a, m, v] = await Promise.all([
+            obs().call('GetSourceActive', { sourceName }),
+            obs().call('GetInputMute', { inputName: sourceName }),
+            obs().call('GetInputVolume', { inputName: sourceName }),
+          ]);
+          return {
+            sourceName,
+            live: a.videoActive,
+            muted: m.inputMuted,
+            mul: v.inputVolumeMul,
+            level: P.fadeLevel(remembered[sourceName], v.inputVolumeMul),
+            enabledInPreview: enabledInPreview.has(sourceName),
+          };
+        }));
+        return P.selectFadeTargets(candidates);
+      }
+
+      // Decide who fades, remember their real levels, and silence the incoming clips. Never blocks a take: any failure means no fades.
+      async function prepare() {
+        const ms = MS.store.get().audioFadeMs;
+        if (!ms || !MS.connection.connected) return null;
+        try {
+          const plan = await Promise.race([
+            (async () => {
+              const targets = await gather();
+              if (!targets.outgoing.length && !targets.incoming.length) return null;
+              const entries = {};
+              for (const e of [...targets.outgoing, ...targets.incoming]) entries[e.sourceName] = e.level;
+              await MS.store.update((d) => ({ ...d, fadeRestore: { ...d.fadeRestore, ...entries } }));
+              await Promise.all(targets.incoming.map((e) => {
+                ramps.set(e.sourceName, ++rampSeq);
+                return setMul(e.sourceName, 0);
+              }));
+              return { ...targets, ms };
+            })(),
+            sleep(PREPARE_TIMEOUT_MS).then(() => null),
+          ]);
+          return plan;
+        } catch (err) {
+          console.error('Audio fade prepare failed:', err);
+          return null;
+        }
+      }
+
+      // Resolves when the outgoing clips are silent (and stay parked at 0).
+      async function fadeOut(plan, ms) {
+        if (!plan?.outgoing.length) return;
+        await ramp(plan.outgoing.map((e) => ({ name: e.sourceName, from: e.mul, to: 0 })), ms ?? plan.ms)
+          .catch((err) => console.error('Audio fade-out failed:', err));
+      }
+
+      function setNextInMs(ms) {
+        nextInMs = ms;
+        setTimeout(() => { if (nextInMs === ms) nextInMs = null; }, 1500);
+      }
+
+      async function forget(name) {
+        await MS.store.update((d) => {
+          const fadeRestore = { ...d.fadeRestore };
+          delete fadeRestore[name];
+          return { ...d, fadeRestore };
+        }).catch(() => {});
+      }
+
+      // A remembered clip going live comes up from wherever it was parked.
+      async function fadeUp(name) {
+        const level = MS.store.get().fadeRestore[name];
+        if (typeof level !== 'number') return;
+        const { inputVolumeMul: current } = await obs().call('GetInputVolume', { inputName: name });
+        if (current >= level) { await forget(name); return; }
+        const done = await ramp([{ name, from: current, to: level }], nextInMs ?? MS.store.get().audioFadeMs);
+        if (done) await forget(name);
+      }
+
+      obs().on('InputActiveStateChanged', (d) => {
+        if (!d.videoActive) return;
+        fadeUp(d.inputName).catch((err) => console.error('Audio fade-in failed:', err));
+      });
+
+      // After a reload or crash mid-fade: anything remembered that is live now still needs to come up.
+      async function recover() {
+        for (const name of Object.keys(MS.store.get().fadeRestore)) {
+          const { videoActive } = await obs().call('GetSourceActive', { sourceName: name }).catch(() => ({}));
+          if (videoActive) fadeUp(name).catch(() => {});
+        }
+      }
+
+      return { prepare, fadeOut, setNextInMs, recover, gather };
+    })();
+
     // ===== Transition Control =====
     MS.transitionControl = (() => {
       const btnCut = document.getElementById('btn-cut');
@@ -1124,6 +1273,11 @@
         if (!MS.connection.connected) return;
         lastTransitionType = 'cut';
         try {
+          const plan = await MS.audioFade.prepare();
+          if (plan) {
+            MS.audioFade.setNextInMs(plan.ms);
+            await MS.audioFade.fadeOut(plan);
+          }
           if (MS.transitions.cutName) {
             await MS.connection.obs.call('SetCurrentSceneTransition', {
               transitionName: MS.transitions.cutName,
@@ -1141,6 +1295,7 @@
         lastTransitionType = 'fade';
         durationMs = durationMs || parseInt(fadeDurationInput.value, 10) || 300;
         try {
+          const plan = await MS.audioFade.prepare();
           if (MS.transitions.fadeName) {
             await MS.connection.obs.call('SetCurrentSceneTransition', {
               transitionName: MS.transitions.fadeName,
@@ -1148,6 +1303,11 @@
             await MS.connection.obs.call('SetCurrentSceneTransitionDuration', {
               transitionDuration: durationMs,
             });
+          }
+          // The room hears monitored audio before the transition mixes it, so the clips fade over the same time as the picture.
+          if (plan) {
+            MS.audioFade.setNextInMs(durationMs);
+            MS.audioFade.fadeOut(plan, durationMs);
           }
           await MS.connection.obs.call('TriggerStudioModeTransition');
           await restartOnTake();
@@ -1164,6 +1324,7 @@
           console.error('SetCurrentPreviewScene failed:', err);
           return;
         }
+        MS.grid.currentPvw = sceneName;
 
         // Then transition using last-selected type
         if (lastTransitionType === 'fade') {
