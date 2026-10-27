@@ -3253,14 +3253,6 @@
           });
           head.appendChild(manage);
         }
-        if (scan.detection.auto) {
-          const fold = document.createElement('button');
-          fold.className = 'btn-manage';
-          fold.textContent = 'Collapse';
-          fold.title = 'Fold the clips away (they keep working; click the tile chevron to open them again)';
-          fold.addEventListener('click', () => setCollapsed(sceneName, true).catch(() => {}));
-          head.appendChild(fold);
-        }
         row.appendChild(head);
 
         const base = (scan.detection.auto ? scan.detection.clips : scan.items)
