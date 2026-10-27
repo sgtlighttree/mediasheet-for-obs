@@ -2452,6 +2452,64 @@
         if (!videoActive) await obs.call('TriggerMediaInputAction', { inputName, mediaAction: PAUSE });
       }
 
+      async function cueClip(sceneName, clipItem) {
+        if (busy || !MS.connection.connected) return;
+        setBusy(true);
+        const tileEl = MS.subgrid.clips.get(`${sceneName}|${clipItem.sceneItemId}`)?.el;
+        tileEl?.classList.add('cueing');
+        const obs = MS.connection.obs;
+        try {
+          const scan = await MS.playlists.scan(sceneName);
+          const item = scan.items.find((i) => i.sceneItemId === clipItem.sceneItemId);
+          if (!item) throw new Error('Clip is no longer in the scene');
+          const activeFlags = await Promise.all(scan.items.map((i) =>
+            obs.call('GetSourceActive', { sourceName: i.sourceName }).then((r) => r.videoActive).catch(() => false)));
+          const active = new Set(scan.items.filter((_, i) => activeFlags[i]).map((i) => i.sourceName));
+
+          const { currentProgramSceneName, currentPreviewSceneName } = await obs.call('GetSceneList');
+          if (currentProgramSceneName === sceneName) {
+            const dup = await sceneDuplication();
+            if (dup !== 'true' || !sawTransitionEnd) {
+              const why = dup !== 'true'
+                ? 'Duplicate Scene is not confirmed on'
+                : 'no transition has been seen since MediaSheet connected';
+              const ok = await MS.confirm(
+                `"${sceneName}" is on Program and ${why}. Cueing could change what is live right now.`,
+                'Cue anyway');
+              if (!ok) return;
+            }
+          }
+
+          const monitorType = item.kind === 'video'
+            ? (await obs.call('GetInputAudioMonitorType', { inputName: item.sourceName })).monitorType
+            : '';
+          const reqs = P.planCue({
+            sceneName,
+            clip: item,
+            items: scan.items,
+            active,
+            monitorType,
+            streamOnlyChosen: streamOnlyChosen.has(item.sourceName),
+          });
+          if (currentPreviewSceneName !== sceneName) {
+            await obs.call('SetCurrentPreviewScene', { sceneName });
+          }
+          for (const r of reqs) await obs.call(r.request, r.data);
+          if (item.kind === 'video' && !active.has(item.sourceName)) await primeFirstFrame(item.sourceName);
+
+          if (scan.detection.auto && !MS.store.get().managed.includes(sceneName)) {
+            await MS.manager.setManaged(sceneName, true);
+          }
+          MS.grid.logEvent(`Cued: ${item.sourceName}`);
+        } catch (err) {
+          console.error('Cue failed:', err);
+          MS.grid.logEvent(`Cue failed: ${err.message}`);
+        } finally {
+          tileEl?.classList.remove('cueing');
+          setBusy(false);
+        }
+      }
+
       async function restartLive(item) {
         try {
           await MS.connection.obs.call('TriggerMediaInputAction', { inputName: item.sourceName, mediaAction: RESTART });
