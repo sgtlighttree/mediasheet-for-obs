@@ -121,6 +121,22 @@ function shouldIdleReset({ managed, isProgram, isPreview, enabledClipCount, trig
   return (!isProgram && !isPreview) || enabledClipCount > 1;
 }
 
+// OBS plays every enabled clip as soon as it starts. Frames rendered since launch tell how long it has been up, so a dock reload mid-show is never mistaken for a launch.
+const STARTUP_WINDOW_S = 180;
+function isFreshStart(renderTotalFrames, fps, windowS = STARTUP_WINDOW_S) {
+  return fps > 0 && renderTotalFrames / fps < windowS;
+}
+
+// Clips to park (paused on their first frame) right after OBS launches: only video clips that are playing, and never while on air.
+function selectStartupParks({ fresh, streaming, recording, clips }) {
+  if (!fresh || streaming || recording) return [];
+  const out = [];
+  for (const c of clips) {
+    if (c.kind === 'video' && c.mediaState === 'OBS_MEDIA_STATE_PLAYING' && !out.includes(c.sourceName)) out.push(c.sourceName);
+  }
+  return out;
+}
+
 function shouldEvaluatePileup({ transitioning, msSinceTransitionEnd, liveClips }) {
   if (transitioning) return false;
   if (liveClips < 2) return false;
@@ -214,6 +230,8 @@ const api = {
   planLeave,
   planActivate,
   shouldIdleReset,
+  isFreshStart,
+  selectStartupParks,
   shouldEvaluatePileup,
   rampValue,
   fadeLevel,

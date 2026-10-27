@@ -2870,7 +2870,7 @@
       // Register the listener before RESTART: the event can fire in the same millisecond.
       // Cue: RESTART, wait for playback, give OBS ~100 ms to draw the first frame, then PAUSE. Pausing the instant PlaybackStarted fires can land before any frame exists (black cued frame, measured); seeking to 0 instead leaves a clip whose later PLAY holds the old picture for ~1 s while the audio runs (measured), so the take restarts the clip (planActivate) and the cue never seeks.
       const CUE_FRAME_MS = 100;
-      async function primeFirstFrame(inputName) {
+      async function primeFirstFrame(inputName, { force = false } = {}) {
         const obs = MS.connection.obs;
         let handler;
         const started = new Promise((resolve) => {
@@ -2887,7 +2887,7 @@
         await new Promise((r) => setTimeout(r, CUE_FRAME_MS));
         // A take during the cue must not freeze Program
         const { videoActive } = await obs.call('GetSourceActive', { sourceName: inputName });
-        if (!videoActive) await obs.call('TriggerMediaInputAction', { inputName, mediaAction: PAUSE });
+        if (force || !videoActive) await obs.call('TriggerMediaInputAction', { inputName, mediaAction: PAUSE });
       }
 
       async function cueClip(sceneName, clipItem) {
@@ -2957,6 +2957,7 @@
 
       return {
         cueClip,
+        parkClip: (inputName) => primeFirstFrame(inputName, { force: true }),
         restartLive,
         streamOnlyChosen,
         resetSession() { sawTransitionEnd = false; },
@@ -3136,6 +3137,28 @@
         idleTimers.delete(oldName);
       }
 
+      // OBS plays every enabled clip when it launches. Right after a launch (and never on air) park them paused on their first frame so nothing is playing until the operator takes something.
+      async function parkAtStartup() {
+        const [stats, video, stream, rec] = await Promise.all([
+          obs.call('GetStats'), obs.call('GetVideoSettings'), obs.call('GetStreamStatus'), obs.call('GetRecordStatus'),
+        ]);
+        const fresh = P.isFreshStart(stats.renderTotalFrames, video.fpsNumerator / video.fpsDenominator);
+        if (!fresh || stream.outputActive || rec.outputActive) return;
+        const clips = [];
+        for (const scene of managedSet()) {
+          if (!MS.playlists.isPlaylist(scene)) continue;
+          const scan = MS.playlists.getScan(scene) ?? await MS.playlists.scan(scene);
+          for (const c of scan.detection.clips) {
+            if (c.kind !== 'video') continue;
+            const { mediaState } = await obs.call('GetMediaInputStatus', { inputName: c.sourceName }).catch(() => ({}));
+            clips.push({ sourceName: c.sourceName, kind: c.kind, mediaState });
+          }
+        }
+        const parks = P.selectStartupParks({ fresh, streaming: false, recording: false, clips });
+        for (const name of parks) await MS.cue.parkClip(name).catch((err) => console.error('Park failed:', err));
+        if (parks.length) MS.grid.logEvent(`OBS just started: parked ${parks.length} clip(s) paused`);
+      }
+
       async function onConnect() {
         const { currentProgramSceneName, currentPreviewSceneName } = await obs.call('GetSceneList');
         views.pgm = currentProgramSceneName;
@@ -3147,6 +3170,7 @@
           await normalizeScene(scene).catch((err) => console.error('Normalize failed:', err));
           scheduleIdle(scene, 'connect');
         }
+        await parkAtStartup().catch((err) => console.error('Startup park failed:', err));
       }
 
       function leftViews(oldScene) {
