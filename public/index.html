@@ -1026,6 +1026,10 @@
           clipOrder: v?.clipOrder && typeof v.clipOrder === 'object' ? v.clipOrder : {},
           subgrid: v?.subgrid && typeof v.subgrid === 'object' ? v.subgrid : {},
           streamOnly: Array.isArray(v?.streamOnly) ? v.streamOnly : [],
+          // Music volume per track file (a multiplier), so each song comes up at its own level
+          musicGain: v?.musicGain && typeof v.musicGain === 'object'
+            ? Object.fromEntries(Object.entries(v.musicGain).filter(([, n]) => typeof n === 'number' && n >= 0 && n <= 20))
+            : {},
           expectedDevice: typeof v?.expectedDevice === 'string' && v.expectedDevice
             ? v.expectedDevice
             : DEFAULT_DEVICE,
@@ -1687,10 +1691,23 @@
       let ready = false;
       let looping = false;
       let polls = 0;
+      // Volume is remembered per track: any change to the player's volume (this strip or OBS's mixer) is saved under the track that is loaded
+      let loadedFile = null;
+      let pendingMul = null;
+      let gainTimer = null;
 
       const obs = () => MS.connection.obs;
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const action = (a) => obs().call('TriggerMediaInputAction', { inputName: PLAYER, mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_' + a });
+
+      async function flushGain() {
+        clearTimeout(gainTimer);
+        if (pendingMul === null || !loadedFile) { pendingMul = null; return; }
+        const file = loadedFile;
+        const mul = Math.round(pendingMul * 10000) / 10000;
+        pendingMul = null;
+        await MS.store.update((d) => ({ ...d, musicGain: { ...d.musicGain, [file]: mul } })).catch(() => {});
+      }
 
       async function loadGroups() {
         const { scenes } = await obs().call('GetSceneList');
@@ -1780,6 +1797,7 @@
           return;
         }
         fillSelect(groups, player.settings.local_file);
+        loadedFile = player.settings.local_file || null;
         looping = player.settings.looping === true;
         loop.classList.toggle('btn-primary', looping);
         try {
@@ -1806,6 +1824,14 @@
         const file = select.value;
         if (!file) return;
         try {
+          // Keep what was set for the old track, then bring the new one up at its own level (a track never set keeps the current volume)
+          await flushGain();
+          loadedFile = file;
+          const saved = MS.store.get().musicGain[file];
+          if (typeof saved === 'number') {
+            await obs().call('SetInputVolume', { inputName: PLAYER, inputVolumeMul: saved });
+            vol.value = P.mulToSlider(saved);
+          }
           await obs().call('SetInputSettings', { inputName: PLAYER, inputSettings: { local_file: file, is_local_file: true }, overlay: true });
           // OBS opens the new file (and may start it); make sure it plays from the top
           await sleep(150);
@@ -1855,6 +1881,13 @@
           .catch((err) => console.error('Music loop failed:', err));
       });
 
+      obs().on('InputVolumeChanged', (d) => {
+        if (d.inputName !== PLAYER) return;
+        pendingMul = d.inputVolumeMul;
+        if (document.activeElement !== vol) vol.value = P.mulToSlider(d.inputVolumeMul);
+        clearTimeout(gainTimer);
+        gainTimer = setTimeout(() => flushGain(), 600);
+      });
       obs().on('InputSettingsChanged', (d) => { if (d.inputName === PLAYER) scheduleRefresh(); });
       obs().on('InputCreated', (d) => { if (d.inputName === PLAYER) scheduleRefresh(); });
       obs().on('InputRemoved', (d) => { if (d.inputName === PLAYER) scheduleRefresh(); });
@@ -2911,11 +2944,12 @@
       }
 
       // The clip live on Program and the clip cued in Preview (a clip enabled in the scene but not live)
+      const SHOW_LIVE_CUED = false; // hidden for now (Matt); set to true to bring the strip back
       function paintStrip() {
         const strip = document.getElementById('lc-strip');
         if (!strip) return;
         const all = [...clips.entries()].map(([k, c]) => ({ scene: k.split('|')[0], c }));
-        strip.hidden = rows.size === 0;
+        strip.hidden = !SHOW_LIVE_CUED || rows.size === 0;
         const live = all.filter((x) => x.c.active && x.scene === MS.grid.currentPgm)[0] ?? all.find((x) => x.c.active);
         const cued = all.filter((x) => !x.c.active && x.c.item.enabled && x.scene === MS.grid.currentPvw)[0] ?? all.find((x) => !x.c.active && x.c.item.enabled);
         const fill = (thumb, name, hit, empty) => {
