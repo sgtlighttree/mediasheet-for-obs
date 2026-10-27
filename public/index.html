@@ -371,6 +371,28 @@
       border-radius: 50%;
       background: var(--pl-color);
     }
+    /* === LIVE / CUED strip === */
+    .lc-strip {
+      flex-shrink: 0;
+      height: 36px;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 8px 8px 0;
+      padding: 0 10px;
+      background: var(--ms-bg-base);
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius-lg);
+      font-size: 12px;
+    }
+    .lc-tag { padding: 1px 6px; border-radius: var(--ms-radius-sm); font-size: 10px; font-weight: 700; }
+    .lc-tag.live { background: var(--ms-tally-pgm); }
+    .lc-tag.cued { background: #1A7F25; }
+    .lc-thumb { width: 34px; height: 20px; flex-shrink: 0; border-radius: var(--ms-radius-sm); background: #000 center / cover no-repeat; border: 1px solid var(--ms-border); }
+    .lc-name { min-width: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lc-spacer { flex: 1; }
+
     /* A thumbnail must not start its own image drag: the tile or clip is what gets dragged */
     .tile img, .clip-tile img { -webkit-user-drag: none; pointer-events: none; }
     .tile.drop-target { outline: 2px dashed var(--ms-primary-lighter); outline-offset: 2px; }
@@ -687,6 +709,17 @@
   </header>
 
   <!-- Tile Grid -->
+  <!-- What is on Program and what CUT will take, always in view while the grid scrolls -->
+  <div id="lc-strip" class="lc-strip" hidden>
+    <span class="lc-tag live">LIVE</span>
+    <span id="lc-live-thumb" class="lc-thumb"></span>
+    <span id="lc-live-name" class="lc-name"></span>
+    <span class="lc-spacer"></span>
+    <span class="lc-tag cued">CUED</span>
+    <span id="lc-cued-thumb" class="lc-thumb"></span>
+    <span id="lc-cued-name" class="lc-name"></span>
+  </div>
+
   <main id="tile-grid"></main>
 
   <!-- Disambiguation Picker Modal -->
@@ -2496,6 +2529,24 @@
           if (c) { c.active = actives[i]; c.item = it; applyState(sceneName, c); }
         });
         updateParentThumb(sceneName);
+        paintStrip();
+      }
+
+      // The clip live on Program and the clip cued in Preview (a clip enabled in the scene but not live)
+      function paintStrip() {
+        const strip = document.getElementById('lc-strip');
+        if (!strip) return;
+        const all = [...clips.entries()].map(([k, c]) => ({ scene: k.split('|')[0], c }));
+        strip.hidden = rows.size === 0;
+        const live = all.filter((x) => x.c.active && x.scene === MS.grid.currentPgm)[0] ?? all.find((x) => x.c.active);
+        const cued = all.filter((x) => !x.c.active && x.c.item.enabled && x.scene === MS.grid.currentPvw)[0] ?? all.find((x) => !x.c.active && x.c.item.enabled);
+        const fill = (thumb, name, hit, empty) => {
+          document.getElementById(name).textContent = hit ? hit.c.item.sourceName : empty;
+          document.getElementById(name).title = hit ? hit.c.item.sourceName : '';
+          document.getElementById(thumb).style.backgroundImage = hit?.c.item.file ? `url("${thumbUrl(hit.c.item.file)}")` : 'none';
+        };
+        fill('lc-live-thumb', 'lc-live-name', live, 'nothing live');
+        fill('lc-cued-thumb', 'lc-cued-name', cued, 'nothing cued');
       }
 
       function ensureToggle(sceneName) {
@@ -2739,7 +2790,7 @@
         picker.click();
       }
 
-      return { render, renderAll, refreshTally, clips, showing, importInto, expand };
+      return { render, renderAll, refreshTally, clips, showing, importInto, expand, paintStrip };
     })();
 
     // ===== In-page Confirm =====
