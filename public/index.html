@@ -1300,7 +1300,34 @@
         }
       }
 
-      return { prepare, fadeOut, setNextInMs, recover, gather };
+      // Taking the clip that is already live (cued alone in Preview) restarts it: fade it out, restart, fade it back in.
+      async function retake() {
+        try {
+          const pvw = MS.grid.currentPvw;
+          if (!MS.connection.connected || !pvw || pvw !== MS.grid.currentPgm || !MS.manager.isManagedPlaylist(pvw)) return false;
+          const targets = P.selectRetake((await gather()).candidates);
+          if (!targets.length) return false;
+          const ms = MS.store.get().audioFadeMs;
+          if (ms > 0) {
+            const entries = {};
+            for (const t of targets) entries[t.sourceName] = t.level;
+            await MS.store.update((d) => ({ ...d, fadeRestore: { ...d.fadeRestore, ...entries } }));
+            await ramp(targets.map((t) => ({ name: t.sourceName, from: t.mul, to: 0 })), ms);
+          }
+          await Promise.all(targets.map((t) => obs().call('TriggerMediaInputAction', { inputName: t.sourceName, mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART' })));
+          if (ms > 0) {
+            await ramp(targets.map((t) => ({ name: t.sourceName, from: 0, to: t.level })), ms);
+            await Promise.all(targets.map((t) => forget(t.sourceName)));
+          }
+          MS.grid.logEvent(`Re-take: ${targets.length} clip(s) restarted`);
+          return true;
+        } catch (err) {
+          console.error('Re-take failed:', err);
+          return false;
+        }
+      }
+
+      return { prepare, fadeOut, setNextInMs, recover, gather, retake };
     })();
 
     // ===== Live Clip Transport =====
@@ -1494,6 +1521,7 @@
         setPending(true);
         lastTransitionType = 'cut';
         try {
+          if (await MS.audioFade.retake()) return;
           const plan = await MS.audioFade.prepare();
           if (plan) {
             MS.grid.logEvent(`Audio fade: out ${plan.outgoing.length}, in ${plan.incoming.length}`);
@@ -1522,6 +1550,7 @@
         lastTransitionType = 'fade';
         durationMs = durationMs || parseInt(fadeDurationInput.value, 10) || 300;
         try {
+          if (await MS.audioFade.retake()) return;
           const plan = await MS.audioFade.prepare();
           const rolled = await MS.preroll.run();
           if (rolled.length) MS.grid.logEvent(`Pre-rolled ${rolled.length} clip(s)`);
@@ -2578,6 +2607,7 @@
         restartLive,
         streamOnlyChosen,
         resetSession() { sawTransitionEnd = false; },
+        sawTransition: () => sawTransitionEnd,
         get busy() { return busy; },
       };
     })();
@@ -2626,6 +2656,31 @@
           kind: hit.clip.kind,
           active: videoActive ? new Set([inputName]) : new Set(),
         }));
+        if (!videoActive && hit.clip.kind === 'video') scheduleSwapCue(hit.scene, hit.clip);
+      }
+
+      // Like switching scenes: after a take the clip that just left Program is cued in Preview, so CUT swaps them back.
+      const swapTimers = new Map();
+      function scheduleSwapCue(sceneName, clip) {
+        clearTimeout(swapTimers.get(sceneName));
+        swapTimers.set(sceneName, setTimeout(() => {
+          swapCue(sceneName, clip).catch((err) => console.error('Swap cue failed:', err));
+        }, 300));
+      }
+
+      async function swapCue(sceneName, clip) {
+        // Without a take this session a cue would raise the "Cue anyway" prompt unasked
+        if (transitioning || !MS.cue.sawTransition() || !isManagedPlaylist(sceneName)) return;
+        const { currentProgramSceneName, currentPreviewSceneName } = await obs.call('GetSceneList');
+        if (currentProgramSceneName !== sceneName || currentPreviewSceneName !== sceneName) return;
+        const { videoActive } = await obs.call('GetSourceActive', { sourceName: clip.sourceName });
+        if (videoActive) return;
+        // Only while Preview still shows nothing but the live clip: never override a clip the operator cued meanwhile
+        const scan = await MS.playlists.scan(sceneName);
+        const enabled = scan.items.filter((i) => i.enabled);
+        const live = await activeSet(enabled);
+        if (enabled.some((i) => !live.has(i.sourceName))) return;
+        await MS.cue.cueClip(sceneName, clip);
       }
 
       async function onActive(inputName) {

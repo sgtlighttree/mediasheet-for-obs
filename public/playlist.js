@@ -173,6 +173,14 @@ function seekTarget(position, max, durationMs) {
   return Math.round(t * durationMs);
 }
 
+// A live clip that is the only thing enabled in Preview is being taken again: it restarts from the top.
+function selectRetake(candidates) {
+  const staying = candidates.filter((c) => c.live && c.enabledInPreview);
+  const cued = candidates.some((c) => !c.live && c.enabledInPreview);
+  if (cued) return [];
+  return staying.map((c) => ({ sourceName: c.sourceName, mul: c.mul, level: c.level }));
+}
+
 const api = {
   EXT,
   classifyItem,
@@ -191,6 +199,7 @@ const api = {
   transportAction,
   formatClock,
   seekTarget,
+  selectRetake,
 };
 
 if (typeof module !== 'undefined') module.exports = api;
