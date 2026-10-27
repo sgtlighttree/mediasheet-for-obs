@@ -395,7 +395,21 @@
 
     /* A thumbnail must not start its own image drag: the tile or clip is what gets dragged */
     .tile img, .clip-tile img { -webkit-user-drag: none; pointer-events: none; }
-    .tile.drop-target { outline: 2px dashed var(--ms-primary-lighter); outline-offset: 2px; }
+    /* Insert marker: a bar on the edge where the dragged tile or clip will land */
+    .tile.drop-before, .tile.drop-after, .clip-tile.drop-before, .clip-tile.drop-after { position: relative; }
+    .tile.drop-before::after, .tile.drop-after::after, .clip-tile.drop-before::after, .clip-tile.drop-after::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 4px;
+      border-radius: 2px;
+      background: var(--ms-primary-lighter);
+      pointer-events: none;
+      z-index: 5;
+    }
+    .tile.drop-before::after, .clip-tile.drop-before::after { left: -3px; }
+    .tile.drop-after::after, .clip-tile.drop-after::after { right: -3px; }
     .tile.pl.tally-pgm .tile-label::before { background: #FF4D6A; }
     .tile.pl .tile-label::after { content: attr(data-sub); float: right; font-size: 10px; color: var(--ms-text-muted); padding-top: 3px; }
     .btn-collapse {
@@ -1934,18 +1948,21 @@
         tile.addEventListener('dragover', (e) => {
           if (MS.drag?.kind !== 'scene' || MS.drag.id === tile.dataset.scene) return;
           e.preventDefault();
-          tile.classList.add('drop-target');
+          const side = window.MSPlaylist.dropSide(e.clientX, tile.getBoundingClientRect());
+          tile.classList.toggle('drop-before', side === 'before');
+          tile.classList.toggle('drop-after', side === 'after');
         });
-        tile.addEventListener('dragleave', () => tile.classList.remove('drop-target'));
+        tile.addEventListener('dragleave', () => tile.classList.remove('drop-before', 'drop-after'));
         tile.addEventListener('drop', (e) => {
-          tile.classList.remove('drop-target');
+          tile.classList.remove('drop-before', 'drop-after');
           if (MS.drag?.kind !== 'scene') return;
           e.preventDefault();
           const from = MS.drag.id;
+          const after = window.MSPlaylist.dropSide(e.clientX, tile.getBoundingClientRect()) === 'after';
           MS.drag = null;
-          MS.grid.moveScene(from, tile.dataset.scene);
+          MS.grid.moveScene(from, tile.dataset.scene, after);
         });
-        tile.addEventListener('dragend', () => { MS.drag = null; document.querySelectorAll('.drop-target').forEach((el) => el.classList.remove('drop-target')); });
+        tile.addEventListener('dragend', () => { MS.drag = null; document.querySelectorAll('.drop-before, .drop-after').forEach((el) => el.classList.remove('drop-before', 'drop-after')); });
 
         // Right-click → context menu (media tiles only)
         if (isMedia) {
@@ -2008,9 +2025,9 @@
         }
       }
 
-      async function moveScene(from, to) {
+      async function moveScene(from, to, after = false) {
         const names = [...tiles.keys()];
-        const next = window.MSPlaylist.moveBefore(window.MSPlaylist.mergeOrder(MS.store.get().sceneOrder, names), from, to);
+        const next = window.MSPlaylist.moveBefore(window.MSPlaylist.mergeOrder(MS.store.get().sceneOrder, names), from, to, after);
         await MS.store.update((d) => ({ ...d, sceneOrder: next }));
         applyOrder();
         logEvent(`Moved scene: ${from}`);
@@ -2442,18 +2459,21 @@
         el.addEventListener('dragover', (e) => {
           if (MS.drag?.kind !== 'clip' || MS.drag.scene !== sceneName || MS.drag.id === item.sceneItemId) return;
           e.preventDefault();
-          el.classList.add('drop-target');
+          const side = window.MSPlaylist.dropSide(e.clientX, el.getBoundingClientRect());
+          el.classList.toggle('drop-before', side === 'before');
+          el.classList.toggle('drop-after', side === 'after');
         });
-        el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
+        el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'));
         el.addEventListener('drop', (e) => {
-          el.classList.remove('drop-target');
+          el.classList.remove('drop-before', 'drop-after');
           if (MS.drag?.kind !== 'clip' || MS.drag.scene !== sceneName) return;
           e.preventDefault();
           const from = MS.drag.id;
+          const after = window.MSPlaylist.dropSide(e.clientX, el.getBoundingClientRect()) === 'after';
           MS.drag = null;
-          moveClip(sceneName, from, item.sceneItemId).catch((err) => console.error('Clip move failed:', err));
+          moveClip(sceneName, from, item.sceneItemId, after).catch((err) => console.error('Clip move failed:', err));
         });
-        el.addEventListener('dragend', () => { MS.drag = null; document.querySelectorAll('.drop-target').forEach((x) => x.classList.remove('drop-target')); });
+        el.addEventListener('dragend', () => { MS.drag = null; document.querySelectorAll('.drop-before, .drop-after').forEach((x) => x.classList.remove('drop-before', 'drop-after')); });
 
         const c = { el, badge, fill, thumb, restart, route, silent, item, active: false };
         return c;
@@ -2626,10 +2646,10 @@
         }
       }
 
-      async function moveClip(sceneName, from, to) {
+      async function moveClip(sceneName, from, to, after = false) {
         const scan = MS.playlists.getScan(sceneName);
         if (!scan) return;
-        const next = window.MSPlaylist.moveBefore(window.MSPlaylist.mergeOrder(MS.store.get().clipOrder[sceneName], clipIds(scan)), from, to);
+        const next = window.MSPlaylist.moveBefore(window.MSPlaylist.mergeOrder(MS.store.get().clipOrder[sceneName], clipIds(scan)), from, to, after);
         await MS.store.update((d) => ({ ...d, clipOrder: { ...d.clipOrder, [sceneName]: next } }));
         applyClipOrder(sceneName);
       }

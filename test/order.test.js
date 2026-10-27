@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { moveBefore, mergeOrder } = require('../public/playlist.js');
+const { moveBefore, dropSide, mergeOrder } = require('../public/playlist.js');
 
 describe('moveBefore', () => {
   it('moves an item to just before the target', () => {
@@ -17,6 +17,28 @@ describe('moveBefore', () => {
     const input = ['a', 'b', 'c'];
     moveBefore(input, 'c', 'a');
     assert.deepEqual(input, ['a', 'b', 'c']);
+  });
+});
+
+describe('moveBefore with after', () => {
+  it('moves an item to just after the target', () => {
+    assert.deepEqual(moveBefore(['a', 'b', 'c', 'd'], 'a', 'c', true), ['b', 'c', 'a', 'd']);
+    assert.deepEqual(moveBefore(['a', 'b', 'c', 'd'], 'a', 'd', true), ['b', 'c', 'd', 'a']);
+    assert.deepEqual(moveBefore(['a', 'b', 'c', 'd'], 'd', 'a', true), ['a', 'd', 'b', 'c']);
+  });
+
+  it('lets a tile go before the first one again', () => {
+    assert.deepEqual(moveBefore(['a', 'b', 'c'], 'c', 'a', false), ['c', 'a', 'b']);
+  });
+});
+
+describe('dropSide', () => {
+  const rect = { left: 100, width: 200 };
+  it('left half is before, right half is after', () => {
+    assert.equal(dropSide(120, rect), 'before');
+    assert.equal(dropSide(199, rect), 'before');
+    assert.equal(dropSide(200, rect), 'after');
+    assert.equal(dropSide(290, rect), 'after');
   });
 });
 

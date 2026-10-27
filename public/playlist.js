@@ -182,12 +182,17 @@ function selectRetake(candidates) {
 }
 
 // Display order (scenes, clips) lives in MediaSheet only: OBS has no scene reorder request and its item order is the layer order.
-function moveBefore(order, from, to) {
+function moveBefore(order, from, to, after = false) {
   if (from === to) return order.slice();
   const next = order.filter((x) => x !== from);
   const at = next.indexOf(to);
-  next.splice(at < 0 ? next.length : at, 0, from);
+  next.splice(at < 0 ? next.length : at + (after ? 1 : 0), 0, from);
   return next;
+}
+
+// Which half of a tile the pointer is over decides whether a drop lands before or after it.
+function dropSide(clientX, rect) {
+  return clientX < rect.left + rect.width / 2 ? 'before' : 'after';
 }
 
 function mergeOrder(saved, current) {
@@ -218,6 +223,7 @@ const api = {
   seekTarget,
   selectRetake,
   moveBefore,
+  dropSide,
   mergeOrder,
 };
 
