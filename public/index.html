@@ -641,6 +641,7 @@
       <span id="connection-dot" class="status-dot disconnected"></span>
       <span id="connection-text">Disconnected</span>
     </span>
+    <button id="btn-reload" class="btn btn-icon" title="Reload MediaSheet">↻</button>
   </footer>
   <div id="audio-pop" class="audio-pop" hidden></div>
 
@@ -876,6 +877,10 @@
         scans.clear();
       }
 
+      function forget(sceneName) {
+        scans.delete(sceneName);
+      }
+
       MS.connection.obs.on('InputSettingsChanged', (d) => invalidate(d.inputName));
       MS.connection.obs.on('InputRemoved', (d) => invalidate(d.inputName));
       MS.connection.obs.on('InputNameChanged', (d) => invalidate(d.oldInputName));
@@ -884,6 +889,7 @@
         scan,
         invalidate,
         reset,
+        forget,
         getScan: (sceneName) => scans.get(sceneName),
         isPlaylist: (sceneName) => !!scans.get(sceneName)?.detection.auto,
       };
@@ -1340,7 +1346,7 @@
         // Click → PVW
         tile.addEventListener('click', () => {
           if (MS.connection.connected) {
-            MS.connection.obs.call('SetCurrentPreviewScene', { sceneName })
+            MS.connection.obs.call('SetCurrentPreviewScene', { sceneName: tile.dataset.scene })
               .catch((err) => console.error('SetCurrentPreviewScene failed:', err));
           }
         });
@@ -1348,7 +1354,7 @@
         // Double-click → Take to PGM
         tile.addEventListener('dblclick', () => {
           if (MS.connection.connected && MS.transitions) {
-            MS.transitionControl.take(sceneName);
+            MS.transitionControl.take(tile.dataset.scene);
           }
         });
 
@@ -1356,7 +1362,7 @@
         if (isMedia) {
           tile.addEventListener('contextmenu', (e) => {
             e.preventDefault();
-            MS.contextMenu.show(e.clientX, e.clientY, sceneName);
+            MS.contextMenu.show(e.clientX, e.clientY, tile.dataset.scene);
           });
         }
 
@@ -1578,6 +1584,27 @@
       });
 
       obs.on('SceneNameChanged', (data) => {
+        const { oldSceneName, sceneName } = data;
+        // Name-keyed state (Managed, sub-grid choice, scan cache, row) follows the rename.
+        MS.manager.renameScene(oldSceneName, sceneName);
+        MS.playlists.forget(oldSceneName);
+        (async () => {
+          await MS.store.update((d) => {
+            const subgrid = { ...d.subgrid };
+            if (oldSceneName in subgrid) {
+              subgrid[sceneName] = subgrid[oldSceneName];
+              delete subgrid[oldSceneName];
+            }
+            return {
+              ...d,
+              managed: d.managed.map((n) => (n === oldSceneName ? sceneName : n)),
+              subgrid,
+            };
+          });
+          await MS.playlists.scan(sceneName).catch(() => null);
+          MS.subgrid.render(oldSceneName);
+          MS.subgrid.render(sceneName);
+        })().catch((err) => console.error('Rename follow-up failed:', err));
         const tile = MS.grid.tiles.get(data.oldSceneName);
         if (tile) {
           tile.sceneName = data.sceneName;
@@ -2291,6 +2318,13 @@
         MS.subgrid.render(sceneName);
       }
 
+      function renameScene(oldName, newName) {
+        if (views.pgm === oldName) views.pgm = newName;
+        if (views.pvw === oldName) views.pvw = newName;
+        clearTimeout(idleTimers.get(oldName));
+        idleTimers.delete(oldName);
+      }
+
       async function onConnect() {
         const { currentProgramSceneName, currentPreviewSceneName } = await obs.call('GetSceneList');
         views.pgm = currentProgramSceneName;
@@ -2376,7 +2410,7 @@
         }
       }, 1000);
 
-      return { setManaged, normalizeInput, normalizeScene, evaluateIdle, onConnect, isManagedPlaylist };
+      return { setManaged, normalizeInput, normalizeScene, evaluateIdle, onConnect, isManagedPlaylist, renameScene };
     })();
 
     // ===== File Import =====
@@ -2578,6 +2612,8 @@
       document.getElementById('fade-duration').addEventListener('change', (e) => {
         localStorage.setItem('ms_transition_duration', e.target.value);
       });
+
+      document.getElementById('btn-reload').addEventListener('click', () => location.reload());
 
       // Auto-connect
       const cfg = MS.connection.getConfig();
