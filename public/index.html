@@ -372,6 +372,31 @@
       background: var(--pl-color);
     }
     .tile.pl.tally-pgm .tile-label::before { background: #FF4D6A; }
+    .tile.pl .tile-label::after { content: attr(data-sub); float: right; font-size: 10px; color: var(--ms-text-muted); padding-top: 3px; }
+    .btn-collapse {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 3;
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      background: rgba(0,0,0,0.65);
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: var(--ms-radius);
+      cursor: pointer;
+    }
+    .btn-collapse:hover { background: rgba(0,0,0,0.85); border-color: #fff; }
+    .btn-collapse span {
+      display: block;
+      width: 7px;
+      height: 7px;
+      margin: 5px auto 0;
+      border-right: 2px solid #fff;
+      border-bottom: 2px solid #fff;
+      transform: rotate(45deg);
+    }
+    .tile.pl-collapsed .btn-collapse span { transform: rotate(-45deg); margin-left: 8px; }
     .tile.pl.tally-pvw .tile-label::before { background: #5CD46A; }
     .subgrid-title {
       width: 100%;
@@ -890,6 +915,8 @@
           // Video playlists are managed unless listed in `unmanaged`; image playlists only when listed in `managed` (their idle reset hides images, which would blank a scene that shows several at once)
           managed: Array.isArray(v?.managed) ? v.managed : [],
           unmanaged: Array.isArray(v?.unmanaged) ? v.unmanaged : [],
+          // Scenes whose box is folded away; everything is open by default
+          collapsed: Array.isArray(v?.collapsed) ? v.collapsed : [],
           subgrid: v?.subgrid && typeof v.subgrid === 'object' ? v.subgrid : {},
           streamOnly: Array.isArray(v?.streamOnly) ? v.streamOnly : [],
           expectedDevice: typeof v?.expectedDevice === 'string' && v.expectedDevice
@@ -2094,6 +2121,7 @@
               ...d,
               managed: d.managed.map((n) => (n === oldSceneName ? sceneName : n)),
               unmanaged: d.unmanaged.map((n) => (n === oldSceneName ? sceneName : n)),
+              collapsed: d.collapsed.map((n) => (n === oldSceneName ? sceneName : n)),
               subgrid,
             };
           });
@@ -2189,16 +2217,35 @@
         return '#' + c.map((v, i) => Math.round(base[i] + (v - base[i]) * amount).toString(16).padStart(2, '0')).join('');
       }
 
+      const isCollapsed = (sceneName) => MS.store.get().collapsed.includes(sceneName);
+
+      async function setCollapsed(sceneName, on) {
+        await MS.store.update((d) => ({
+          ...d,
+          collapsed: on ? [...new Set([...d.collapsed, sceneName])] : d.collapsed.filter((n) => n !== sceneName),
+        }));
+        decorate(sceneName);
+      }
+
+      function expand(sceneName) {
+        if (isCollapsed(sceneName)) setCollapsed(sceneName, false).catch(() => {});
+      }
+
       function decorate(sceneName) {
         const tile = MS.grid.getTile(sceneName);
         if (!tile) return;
         const scan = MS.playlists.getScan(sceneName);
         const playlist = !!scan?.detection.auto;
         const row = rows.get(sceneName);
+        const collapsed = isCollapsed(sceneName);
         const color = playlist ? colorFor(sceneName) : '#5A5F70';
         const tint = tintOf(color, 0.16);
+        if (row) row.hidden = collapsed;
         tile.el.classList.toggle('pl', playlist || !!row);
-        tile.el.classList.toggle('pl-open', !!row);
+        tile.el.classList.toggle('pl-open', !!row && !collapsed);
+        tile.el.classList.toggle('pl-collapsed', !!row && collapsed);
+        const label = tile.el.querySelector('.tile-label');
+        if (label) label.dataset.sub = playlist ? `${scan.detection.clips.length} clips` : '';
         for (const el of [tile.el, row]) {
           if (!el) continue;
           el.style.setProperty('--pl-color', color);
@@ -2209,8 +2256,8 @@
       function showing(sceneName) {
         const scan = MS.playlists.getScan(sceneName);
         if (!scan || scan.items.length < 2) return false;
-        const pref = MS.store.get().subgrid[sceneName];
-        return pref === undefined ? scan.detection.auto : pref === true;
+        if (scan.detection.auto) return true;
+        return MS.store.get().subgrid[sceneName] === true;
       }
 
       function thumbUrl(file) {
@@ -2375,6 +2422,26 @@
         if (!tile) return;
         let btn = tile.el.querySelector('.btn-clips');
         const eligible = !!scan && scan.items.length >= 2;
+        let chev = tile.el.querySelector('.btn-collapse');
+        if (eligible && scan.detection.auto) {
+          btn?.remove();
+          if (!chev) {
+            chev = document.createElement('button');
+            chev.className = 'btn-collapse';
+            chev.setAttribute('aria-label', 'Collapse or expand this playlist\'s clips');
+            chev.title = 'Collapse or expand the clips';
+            chev.appendChild(document.createElement('span'));
+            const stop = (e) => e.stopPropagation(); // a click here must not also preview or take the scene
+            chev.addEventListener('dblclick', stop);
+            chev.addEventListener('click', (e) => {
+              e.stopPropagation();
+              setCollapsed(sceneName, !isCollapsed(sceneName)).catch(() => {});
+            });
+            tile.el.appendChild(chev); // not the thumbnail: its picture is replaced when a clip thumbnail loads
+          }
+          return;
+        }
+        chev?.remove();
         if (!eligible) { btn?.remove(); return; }
         if (!btn) {
           btn = document.createElement('button');
@@ -2449,6 +2516,14 @@
             paint();
           });
           head.appendChild(manage);
+        }
+        if (scan.detection.auto) {
+          const fold = document.createElement('button');
+          fold.className = 'btn-manage';
+          fold.textContent = 'Collapse';
+          fold.title = 'Fold the clips away (they keep working; click the tile chevron to open them again)';
+          fold.addEventListener('click', () => setCollapsed(sceneName, true).catch(() => {}));
+          head.appendChild(fold);
         }
         row.appendChild(head);
 
@@ -2554,7 +2629,7 @@
         picker.click();
       }
 
-      return { render, renderAll, refreshTally, clips, showing, importInto };
+      return { render, renderAll, refreshTally, clips, showing, importInto, expand };
     })();
 
     // ===== In-page Confirm =====
@@ -2965,6 +3040,7 @@
             row.insertBefore(banner, row.children[1] || null);
           }
           banner.querySelector('span').textContent = `${live} clips playing on Program — Reset?`;
+          MS.subgrid.expand(scene);
         }
       }, 1000);
 
