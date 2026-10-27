@@ -483,6 +483,9 @@
     .lc-tag { padding: 1px 6px; border-radius: var(--ms-radius-sm); font-size: 10px; font-weight: 700; }
     .lc-tag.live { background: var(--ms-tally-pgm); }
     .lc-tag.cued { background: #1A7F25; }
+    .lc-tag.next { background: #2f6fd6; }
+    .lc-next { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .lc-in { color: var(--ms-text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
     .lc-thumb { width: 34px; height: 20px; flex-shrink: 0; border-radius: var(--ms-radius-sm); background: #000 center / cover no-repeat; border: 1px solid var(--ms-border); }
     .lc-name { min-width: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .lc-spacer { flex: 1; }
@@ -835,6 +838,12 @@
     <span id="lc-live-thumb" class="lc-thumb"></span>
     <span id="lc-live-name" class="lc-name"></span>
     <span class="lc-spacer"></span>
+    <!-- Autoplay: the clip it will take next and when (only the client running autoplay knows) -->
+    <span id="lc-next" class="lc-next" hidden>
+      <span class="lc-tag next">NEXT</span>
+      <span id="lc-next-name" class="lc-name"></span>
+      <span id="lc-next-in" class="lc-in"></span>
+    </span>
     <span class="lc-tag cued">CUED</span>
     <span id="lc-cued-thumb" class="lc-thumb"></span>
     <span id="lc-cued-name" class="lc-name"></span>
@@ -3070,7 +3079,7 @@
       }
 
       // The clip live on Program and the clip cued in Preview (a clip enabled in the scene but not live)
-      const SHOW_LIVE_CUED = false; // hidden for now (Matt); set to true to bring the strip back
+      const SHOW_LIVE_CUED = true; // Matt hid it once, then asked for it back (worth the screen space, esp. with the NEXT slot)
       function paintStrip() {
         const strip = document.getElementById('lc-strip');
         if (!strip) return;
@@ -3888,6 +3897,7 @@
         if (scene) bannerText.textContent = `${scene}: autoplay is running. Presses on scenes, clips and transitions are ignored. Untick Playback lock in Playlist Options (or Unlock) to take control.`;
         for (const [name, tile] of MS.grid.tiles) tile.el.classList.toggle('pl-locked-tile', name === scene);
         for (const s of armedScenes()) MS.subgrid.paintAuto(s);
+        paintNext();
       }
       setInterval(paintLock, 500);
 
@@ -3926,6 +3936,26 @@
         st.timer = null;
         st.dueAt = 0;
         st.cuedFor = null;
+        st.nextInfo = null;
+      }
+
+      // What the strip shows for the armed playlist that is on Program: the next clip and the countdown to its take
+      function nextUp() {
+        const scene = MS.grid.currentPgm;
+        const st = states.get(scene);
+        if (!st || !isArmed(scene)) return null;
+        if (st.heldFor != null) return { held: true, scene };
+        return st.nextInfo ? { scene, name: st.nextInfo.name, inMs: Math.max(0, st.nextInfo.dueAt - Date.now()) } : null;
+      }
+
+      const nextEl = document.getElementById('lc-next');
+      function paintNext() {
+        const n = nextUp();
+        nextEl.hidden = !n;
+        if (!n) return;
+        document.getElementById('lc-next-name').textContent = n.held ? 'autoplay held (click the HELD badge to resume)' : n.name;
+        document.getElementById('lc-next-name').title = n.held ? '' : n.name;
+        document.getElementById('lc-next-in').textContent = n.held ? '' : `in ${P.formatClock(n.inMs)}`;
       }
 
       function effectiveTransition(scene) {
@@ -4060,6 +4090,7 @@
           return;
         }
         if (plan.act !== 'advance') { reset(scene); return; }
+        st.nextInfo = { name: plan.next.sourceName, dueAt: Date.now() + plan.takeInMs };
 
         if (plan.cueNow && st.cuedFor !== plan.next.sourceName) {
           if (await MS.cue.cueClip(scene, plan.next, { auto: true })) st.cuedFor = plan.next.sourceName;
