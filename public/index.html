@@ -829,7 +829,9 @@
 
       function normalize(v) {
         return {
+          // Video playlists are managed unless listed in `unmanaged`; image playlists only when listed in `managed` (their idle reset hides images, which would blank a scene that shows several at once)
           managed: Array.isArray(v?.managed) ? v.managed : [],
+          unmanaged: Array.isArray(v?.unmanaged) ? v.unmanaged : [],
           subgrid: v?.subgrid && typeof v.subgrid === 'object' ? v.subgrid : {},
           streamOnly: Array.isArray(v?.streamOnly) ? v.streamOnly : [],
           expectedDevice: typeof v?.expectedDevice === 'string' && v.expectedDevice
@@ -935,6 +937,7 @@
         reset,
         forget,
         getScan: (sceneName) => scans.get(sceneName),
+        playlistScenes: () => [...scans.values()].filter((sc) => sc.detection.auto).map((sc) => ({ sceneName: sc.sceneName, kind: sc.detection.kind })),
         isPlaylist: (sceneName) => !!scans.get(sceneName)?.detection.auto,
       };
     })();
@@ -2021,6 +2024,7 @@
             return {
               ...d,
               managed: d.managed.map((n) => (n === oldSceneName ? sceneName : n)),
+              unmanaged: d.unmanaged.map((n) => (n === oldSceneName ? sceneName : n)),
               subgrid,
             };
           });
@@ -2336,17 +2340,16 @@
           const manage = document.createElement('button');
           manage.className = 'btn-manage';
           const paint = () => {
-            const on = MS.store.get().managed.includes(sceneName);
+            const on = MS.manager.isManagedPlaylist(sceneName);
             manage.classList.toggle('on', on);
             manage.textContent = on ? 'Managed' : 'Manage';
             manage.title = on
-              ? 'MediaSheet resets idle clips, mutes clips that leave Program and normalizes settings. Click to stop managing.'
-              : 'Let MediaSheet manage this playlist (idle reset, mute on leave, hold-frame). Cueing a clip also does this.';
+              ? 'MediaSheet handles this playlist: restarts and unmutes a clip when it goes live, mutes it when it leaves, pre-rolls takes, resets idle clips. Click to switch off.'
+              : 'MediaSheet leaves this playlist alone. Click to switch it on.';
           };
           paint();
           manage.addEventListener('click', async () => {
-            const on = !MS.store.get().managed.includes(sceneName);
-            await MS.manager.setManaged(sceneName, on);
+            await MS.manager.setManaged(sceneName, !MS.manager.isManagedPlaylist(sceneName));
             paint();
           });
           head.appendChild(manage);
@@ -2579,9 +2582,6 @@
           for (const r of reqs) await obs.call(r.request, r.data);
           if (item.kind === 'video' && !active.has(item.sourceName)) await primeFirstFrame(item.sourceName);
 
-          if (scan.detection.auto && !MS.store.get().managed.includes(sceneName)) {
-            await MS.manager.setManaged(sceneName, true);
-          }
           MS.grid.logEvent(`Cued: ${item.sourceName}`);
         } catch (err) {
           console.error('Cue failed:', err);
@@ -2625,8 +2625,12 @@
       let transitioning = false;
       let transitionEndedAt = null;
 
-      const managedSet = () => new Set(MS.store.get().managed);
-      const isManagedPlaylist = (scene) => managedSet().has(scene) && MS.playlists.isPlaylist(scene);
+      // Video playlists are managed unless switched off; image playlists only when switched on
+      const managedSet = () => new Set(MS.playlists.playlistScenes().filter(({ sceneName, kind }) => {
+        const d = MS.store.get();
+        return kind === 'video' ? !d.unmanaged.includes(sceneName) : d.managed.includes(sceneName);
+      }).map((x) => x.sceneName));
+      const isManagedPlaylist = (scene) => managedSet().has(scene);
 
       async function run(reqs) {
         for (const r of reqs) await obs.call(r.request, r.data);
@@ -2762,9 +2766,8 @@
       async function setManaged(sceneName, on) {
         await MS.store.update((d) => ({
           ...d,
-          managed: on
-            ? [...new Set([...d.managed, sceneName])]
-            : d.managed.filter((n) => n !== sceneName),
+          managed: on ? [...new Set([...d.managed, sceneName])] : d.managed.filter((n) => n !== sceneName),
+          unmanaged: on ? d.unmanaged.filter((n) => n !== sceneName) : [...new Set([...d.unmanaged, sceneName])],
         }));
         if (on) {
           await normalizeScene(sceneName).catch((err) => console.error('Normalize failed:', err));
@@ -2814,8 +2817,11 @@
         job.catch((err) => console.error('Active-state handler failed:', err));
       });
       obs.on('SceneItemCreated', (d) => {
-        if (!managedSet().has(d.sceneName)) return;
-        setTimeout(() => normalizeScene(d.sceneName).catch(() => {}), 400);
+        // The scene may just have become a playlist: rescan before deciding
+        setTimeout(async () => {
+          await MS.playlists.scan(d.sceneName).catch(() => null);
+          if (managedSet().has(d.sceneName)) normalizeScene(d.sceneName).catch(() => {});
+        }, 400);
       });
 
       // Pile-up: two or more clips of one playlist live on Program is never legitimate under solo.
