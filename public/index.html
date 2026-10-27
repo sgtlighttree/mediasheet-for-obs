@@ -332,59 +332,47 @@
       cursor: pointer;
     }
     .btn-clips.on { background: var(--ms-primary); border-color: var(--ms-primary-dark); }
-    /* === Playlist tabs === */
-    .playlist-panel {
-      flex-shrink: 0;
-      display: flex;
-      flex-direction: column;
-      max-height: 44vh;
-      border-top: 1px solid var(--ms-border);
-      background: var(--ms-bg-window);
-    }
-    .pl-tabs { display: flex; gap: 3px; padding: 6px 8px 0; overflow-x: auto; flex-shrink: 0; }
-    .pl-tab {
-      --tab-color: #2f6fd6;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 3px 12px 4px;
-      border: 1px solid var(--ms-border);
-      border-top: 3px solid var(--tab-color);
-      border-bottom: none;
-      border-radius: 6px 6px 0 0;
-      background: var(--ms-bg-base);
-      color: var(--ms-text-muted);
-      font: inherit;
-      font-size: 12px;
-      white-space: nowrap;
-      cursor: pointer;
-    }
-    .pl-tab:hover { color: var(--ms-text); }
-    .pl-tab.active {
-      background: color-mix(in srgb, var(--tab-color) 24%, var(--ms-bg-preview));
-      color: var(--ms-text);
-      font-weight: 600;
-    }
-    .pl-tab .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ms-tally-pgm); display: none; }
-    .pl-tab.live .live-dot { display: block; }
-    .pl-tab.warn { outline: 1px solid var(--ms-warning); }
-    .pl-body { overflow-y: auto; padding: 0 8px 8px; }
-    .pl-body .subgrid-row {
-      border-color: var(--tab-color);
-      background: color-mix(in srgb, var(--tab-color) 14%, var(--ms-bg-preview));
-      border-radius: 0 6px 6px 6px;
-    }
-
+    /* A playlist's scene tile and its box are one shape: same outline color, same flat fill, the tile overlapping the box's top border */
     .subgrid-row {
+      --pl-color: var(--ms-border);
+      --pl-tint: var(--ms-bg-preview);
       grid-column: 1 / -1;
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
       padding: 6px;
-      background: var(--ms-bg-preview);
-      border: 1px solid var(--ms-border);
+      background: var(--pl-tint);
+      border: 2px solid var(--pl-color);
       border-radius: var(--ms-radius-lg);
     }
+    .tile.pl {
+      --pl-color: var(--ms-border);
+      --pl-tint: var(--ms-bg-preview);
+      background: var(--pl-tint);
+      border-color: var(--pl-color);
+      padding: 6px;
+    }
+    .tile.pl.tally-pgm, .tile.pl.tally-pvw { border-color: var(--pl-color); }
+    .tile.pl .tile-thumbnail { border-radius: var(--ms-radius); overflow: hidden; }
+    .tile.pl-open {
+      border-bottom: none;
+      border-radius: 8px 8px 0 0;
+      position: relative;
+      z-index: 2;
+      margin-bottom: -10px; /* grid gap (8) + the box's top border (2) */
+      padding-bottom: 16px;
+    }
+    .tile.pl .tile-label::before {
+      content: '';
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      margin-right: 6px;
+      border-radius: 50%;
+      background: var(--pl-color);
+    }
+    .tile.pl.tally-pgm .tile-label::before { background: #FF4D6A; }
+    .tile.pl.tally-pvw .tile-label::before { background: #5CD46A; }
     .subgrid-title {
       width: 100%;
       font-size: 10px;
@@ -672,12 +660,6 @@
 
   <!-- Tile Grid -->
   <main id="tile-grid"></main>
-
-  <!-- Playlist tabs: one colored tab per playlist, one playlist's clips at a time -->
-  <section id="playlist-panel" class="playlist-panel" hidden>
-    <div id="pl-tabs" class="pl-tabs"></div>
-    <div id="pl-body" class="pl-body"></div>
-  </section>
 
   <!-- Disambiguation Picker Modal -->
   <div id="picker-modal" class="modal-overlay" hidden>
@@ -2078,7 +2060,6 @@
 
       obs.on('CurrentProgramSceneChanged', (data) => {
         MS.grid.currentPgm = data.sceneName;
-        if (MS.subgrid.clips && [...MS.subgrid.clips.keys()].some((k) => k.startsWith(data.sceneName + '|'))) MS.subgrid.showTab(data.sceneName);
         MS.grid.logEvent('PGM → ' + data.sceneName);
       });
 
@@ -2198,62 +2179,31 @@
       const rescanTimers = new Map();
       const key = (scene, id) => `${scene}|${id}`;
 
-      // ---- tabs: one colored tab per row, only the active playlist's clips shown ----
-      const panel = document.getElementById('playlist-panel');
-      const tabsEl = document.getElementById('pl-tabs');
-      const bodyEl = document.getElementById('pl-body');
+      // ---- joined look: colors per playlist, and the classes/variables that make tile + box one shape ----
       const PALETTE = ['#2f6fd6', '#c98a1b', '#2f9e4f', '#8a52d6', '#1b9aa6', '#d65a8a'];
-      const TAB_KEY = 'ms_active_tab';
-      let activeScene = null;
-      try { activeScene = localStorage.getItem(TAB_KEY); } catch {}
-      let chosen = !!activeScene; // without a remembered choice the tab follows what is on Program
-      let tabSignature = '';
       const colorFor = (name) => PALETTE[[...name].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7) % PALETTE.length];
-
-      function orderedScenes() {
-        const order = [...MS.grid.tiles.keys()];
-        return [...rows.keys()].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+      // mix a #rrggbb color into the dock background so a tile and its box share one flat fill
+      function tintOf(hex, amount) {
+        const base = [0x1d, 0x1f, 0x26];
+        const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+        return '#' + c.map((v, i) => Math.round(base[i] + (v - base[i]) * amount).toString(16).padStart(2, '0')).join('');
       }
 
-      function paintTabs() {
-        const names = orderedScenes();
-        panel.hidden = names.length === 0;
-        if (!names.includes(activeScene)) activeScene = names.includes(MS.grid.currentPgm) ? MS.grid.currentPgm : (names[0] ?? null);
-        const signature = names.join('\n');
-        if (signature !== tabSignature) {
-          tabSignature = signature;
-          tabsEl.innerHTML = '';
-          for (const name of names) {
-            const tab = document.createElement('button');
-            tab.className = 'pl-tab';
-            tab.dataset.scene = name;
-            tab.style.setProperty('--tab-color', colorFor(name));
-            const dot = document.createElement('span');
-            dot.className = 'live-dot';
-            const label = document.createElement('span');
-            label.textContent = name;
-            tab.append(dot, label);
-            tab.addEventListener('click', () => showTab(tab.dataset.scene));
-            tabsEl.appendChild(tab);
-          }
+      function decorate(sceneName) {
+        const tile = MS.grid.getTile(sceneName);
+        if (!tile) return;
+        const scan = MS.playlists.getScan(sceneName);
+        const playlist = !!scan?.detection.auto;
+        const row = rows.get(sceneName);
+        const color = playlist ? colorFor(sceneName) : '#5A5F70';
+        const tint = tintOf(color, 0.16);
+        tile.el.classList.toggle('pl', playlist || !!row);
+        tile.el.classList.toggle('pl-open', !!row);
+        for (const el of [tile.el, row]) {
+          if (!el) continue;
+          el.style.setProperty('--pl-color', color);
+          el.style.setProperty('--pl-tint', tint);
         }
-        for (const tab of tabsEl.children) {
-          const name = tab.dataset.scene;
-          tab.classList.toggle('active', name === activeScene);
-          tab.classList.toggle('live', [...clips].some(([k, c]) => k.startsWith(name + '|') && c.active));
-          tab.classList.toggle('warn', !!rows.get(name)?.querySelector('.pileup'));
-        }
-        for (const [name, row] of rows) {
-          row.hidden = name !== activeScene;
-          row.style.setProperty('--tab-color', colorFor(name));
-        }
-      }
-
-      function showTab(name) {
-        activeScene = name;
-        chosen = true;
-        try { localStorage.setItem(TAB_KEY, name); } catch {}
-        paintTabs();
       }
 
       function showing(sceneName) {
@@ -2417,7 +2367,6 @@
           if (c) { c.active = actives[i]; c.item = it; applyState(sceneName, c); }
         });
         updateParentThumb(sceneName);
-        paintTabs();
       }
 
       function ensureToggle(sceneName) {
@@ -2470,9 +2419,9 @@
         rows.get(sceneName)?.remove();
         rows.delete(sceneName);
         for (const k of [...clips.keys()]) if (k.startsWith(sceneName + '|')) clips.delete(k);
-        if (!tile) { paintTabs(); return; }
+        if (!tile) return;
         ensureToggle(sceneName);
-        if (!showing(sceneName)) { paintTabs(); return; }
+        if (!showing(sceneName)) { decorate(sceneName); return; }
 
         const row = document.createElement('div');
         row.className = 'subgrid-row';
@@ -2519,9 +2468,9 @@
           add.addEventListener('click', () => MS.subgrid.importInto(sceneName));
           row.appendChild(add);
         }
-        bodyEl.appendChild(row);
+        tile.el.after(row);
         rows.set(sceneName, row);
-        paintTabs();
+        decorate(sceneName);
         for (const [k, c] of clips) if (k.startsWith(sceneName + '|')) loadRoute(c);
         refreshTally(sceneName);
       }
@@ -2531,8 +2480,6 @@
           if (!MS.grid.getTile(name)) { row.remove(); rows.delete(name); }
         }
         for (const name of MS.grid.tiles.keys()) render(name);
-        if (!chosen && rows.has(MS.grid.currentPgm)) activeScene = MS.grid.currentPgm;
-        paintTabs();
       }
 
       function scheduleRescan(sceneName) {
@@ -2607,7 +2554,7 @@
         picker.click();
       }
 
-      return { render, renderAll, refreshTally, clips, showing, importInto, showTab, paintTabs };
+      return { render, renderAll, refreshTally, clips, showing, importInto };
     })();
 
     // ===== In-page Confirm =====
@@ -3018,7 +2965,6 @@
             row.insertBefore(banner, row.children[1] || null);
           }
           banner.querySelector('span').textContent = `${live} clips playing on Program — Reset?`;
-          MS.subgrid.showTab(scene);
         }
       }, 1000);
 
