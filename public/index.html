@@ -3828,7 +3828,9 @@
       const TICK_MS = 500;
       const clientId = Math.random().toString(36).slice(2);
       // Only OBS's own dock (it exposes window.obsstudio) runs the engine, or a browser tab opened with ?engine. A test browser or a stray tab never takes clips on Program.
-      const allowed = !!window.obsstudio || new URLSearchParams(location.search).has('engine');
+      // ?engine=test is for my headless harness: the engine stays off until the test sets window.__msEngineGo, after its OBS write stubs are in place.
+      const engineParam = new URLSearchParams(location.search).get('engine');
+      const allowed = () => !!window.obsstudio || (engineParam !== null && engineParam !== 'test') || (engineParam === 'test' && window.__msEngineGo === true);
       const states = new Map(); // scene → { timer, dueAt, cuedFor, advancing }
       let holder = false;
       let ticking = false;
@@ -3885,7 +3887,7 @@
       }
 
       async function renewLease() {
-        if (!allowed || !MS.connection.connected || !armedScenes().length) { holder = false; return; }
+        if (!allowed() || !MS.connection.connected || !armedScenes().length) { holder = false; return; }
         let lock = null;
         try {
           lock = (await obs().call('GetPersistentData', { realm: REALM, slotName: LOCK_SLOT })).slotValue;
@@ -4071,7 +4073,7 @@
       }
 
       function start() {
-        if (!allowed || tickTimer) return;
+        if (!allowed() || tickTimer) return;
         renewLease();
         leaseTimer = setInterval(() => renewLease().catch(() => {}), 1000);
         tickTimer = setInterval(() => tick().catch(() => {}), TICK_MS);
