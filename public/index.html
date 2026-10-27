@@ -717,6 +717,7 @@
       <button id="btn-cut" class="btn btn-transition" disabled>CUT</button>
       <button id="btn-fade" class="btn btn-transition" disabled>FADE</button>
       <input type="number" id="fade-duration" class="duration-input" value="300" min="50" max="5000" step="50" title="Fade duration (ms)">
+      <button id="btn-stinger" class="btn btn-transition" disabled title="Uses the Stinger transition in OBS (add one under Scene Transitions)">STINGER</button>
       <span class="duration-label">ms</span>
       <button id="btn-settings" class="btn btn-icon" title="Settings">⚙</button>
     </div>
@@ -1084,10 +1085,10 @@
     })();
 
     // ===== Transition Resolver =====
-    MS.transitions = { cutName: null, fadeName: null };
+    MS.transitions = { cutName: null, fadeName: null, stingerName: null };
 
     // ===== Canvas Cache =====
-    MS.canvas = { width: 1920, height: 1080 };
+    MS.canvas = { width: 1920, height: 1080, fps: 30 };
 
     // ===== Post-connect initialization =====
     async function onConnected() {
@@ -1100,9 +1101,13 @@
 
       MS.transitions.cutName = null;
       MS.transitions.fadeName = null;
+      MS.transitions.stingerName = null;
       try {
         const { transitions } = await obs.call('GetSceneTransitionList');
         for (const t of transitions) {
+          if (t.transitionKind === 'obs_stinger_transition' && !MS.transitions.stingerName) {
+            MS.transitions.stingerName = t.transitionName;
+          }
           if (t.transitionKind === 'cut_transition' && !MS.transitions.cutName) {
             MS.transitions.cutName = t.transitionName;
           }
@@ -1127,6 +1132,7 @@
         const vs = await obs.call('GetVideoSettings');
         MS.canvas.width = vs.baseWidth;
         MS.canvas.height = vs.baseHeight;
+        MS.canvas.fps = vs.fpsNumerator / vs.fpsDenominator;
       } catch {}
 
       // Enable UI buttons
@@ -1134,6 +1140,7 @@
       document.getElementById('btn-hold-frames').disabled = false;
       document.getElementById('btn-cut').disabled = false;
       document.getElementById('btn-fade').disabled = false;
+      document.getElementById('btn-stinger').disabled = !MS.transitions.stingerName;
 
       MS.cue.resetSession();
       await MS.store.load();
@@ -1151,6 +1158,7 @@
       document.getElementById('btn-hold-frames').disabled = true;
       document.getElementById('btn-cut').disabled = true;
       document.getElementById('btn-fade').disabled = true;
+      document.getElementById('btn-stinger').disabled = true;
       MS.liveTransport.stop();
     }
 
@@ -1408,10 +1416,14 @@
           .catch((err) => console.error('Audio fade-out failed:', err));
       }
 
-      function setNextInMs(ms) {
+      function setNextInMs(ms, ttlMs = 1500) {
         nextInMs = ms;
-        setTimeout(() => { if (nextInMs === ms) nextInMs = null; }, 1500);
+        setTimeout(() => { if (nextInMs === ms) nextInMs = null; }, ttlMs);
       }
+
+      // A stinger activates the incoming clip a second before its picture is visible: its audio waits for the cut point.
+      let fadeUpAt = 0;
+      const holdFadeUpUntil = (at) => { fadeUpAt = at; };
 
       async function forget(name) {
         await MS.store.update((d) => {
@@ -1433,7 +1445,9 @@
 
       obs().on('InputActiveStateChanged', (d) => {
         if (!d.videoActive) return;
-        fadeUp(d.inputName).catch((err) => console.error('Audio fade-in failed:', err));
+        sleep(Math.max(0, fadeUpAt - Date.now()))
+          .then(() => fadeUp(d.inputName))
+          .catch((err) => console.error('Audio fade-in failed:', err));
       });
 
       // After a reload or crash mid-fade: anything remembered that is live now still needs to come up.
@@ -1471,7 +1485,7 @@
         }
       }
 
-      return { prepare, fadeOut, setNextInMs, recover, gather, retake };
+      return { prepare, fadeOut, setNextInMs, holdFadeUpUntil, recover, gather, retake };
     })();
 
     // ===== Live Clip Transport =====
@@ -1650,15 +1664,21 @@
       // Typical run() time (gather, mute, restart, first frame, settle); a CUT starts it this long before the fade-out ends so the clip is only just playing when it goes live
       const LEAD_MS = 150;
 
-      return { run, LEAD_MS, was: (inputName) => Date.now() - (recent.get(inputName) ?? -Infinity) < WINDOW_MS };
+      // A stinger take restarts its incoming clips itself, just before the cut point, and marks them so activation does not restart them again.
+      async function restartIncoming(inputName) {
+        if (await restartAndWait(inputName)) recent.set(inputName, Date.now());
+      }
+
+      return { run, restartIncoming, LEAD_MS, was: (inputName) => Date.now() - (recent.get(inputName) ?? -Infinity) < WINDOW_MS };
     })();
 
     // ===== Transition Control =====
     MS.transitionControl = (() => {
       const btnCut = document.getElementById('btn-cut');
       const btnFade = document.getElementById('btn-fade');
+      const btnStinger = document.getElementById('btn-stinger');
       const fadeDurationInput = document.getElementById('fade-duration');
-      let lastTransitionType = 'cut'; // 'cut' or 'fade'
+      let lastTransitionType = 'cut'; // 'cut', 'fade' or 'stinger'
       // A second take during the audio pre-roll would swap Preview/Program back, so presses are ignored until the first finishes.
       let pending = false;
 
@@ -1666,6 +1686,7 @@
         pending = on;
         btnCut.classList.toggle('busy', on);
         btnFade.classList.toggle('busy', on);
+        btnStinger.classList.toggle('busy', on);
       }
 
       async function cut() {
@@ -1732,6 +1753,79 @@
         }
       }
 
+      // ----- Stinger -----
+      // OBS plays the stinger video over the swap. Its "transition point" is when the picture changes (the video should cover the whole canvas there). The outgoing audio fades out to that moment, the incoming clip restarts just before it (hidden behind the stinger, so it appears near 0:00) and its audio comes up at it.
+      const STINGER_RESTART_LEAD_MS = 300;
+      let stingerHoldUntil = 0;
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      function waitForEvent(name, timeoutMs) {
+        return new Promise((resolve) => {
+          const obs = MS.connection.obs;
+          const done = () => { clearTimeout(timer); obs.off(name, done); resolve(); };
+          const timer = setTimeout(done, timeoutMs);
+          obs.on(name, done);
+        });
+      }
+
+      // SetCurrentSceneTransition applies a moment later, so poll until OBS reports the stinger before reading its settings
+      async function readStinger() {
+        const obs = MS.connection.obs;
+        await obs.call('SetCurrentSceneTransition', { transitionName: MS.transitions.stingerName });
+        for (let i = 0; i < 40; i++) {
+          const t = await obs.call('GetCurrentSceneTransition');
+          if (t.transitionName === MS.transitions.stingerName) {
+            return window.MSPlaylist.stingerPointMs(t.transitionSettings, MS.canvas.fps);
+          }
+          await sleep(25);
+        }
+        throw new Error('OBS did not switch to the stinger');
+      }
+
+      async function stinger() {
+        if (!MS.connection.connected || pending || !MS.transitions.stingerName) return;
+        setPending(true);
+        lastTransitionType = 'stinger';
+        try {
+          if (await MS.audioFade.retake()) return;
+          const obs = MS.connection.obs;
+          const pointMs = await readStinger();
+          if (pointMs === null) {
+            MS.grid.logEvent('Stinger has no video file: pick one in OBS (Scene Transitions, Stinger, Properties)');
+            return;
+          }
+          const { candidates } = await MS.audioFade.gather();
+          const incoming = candidates.filter((c) => !c.live && c.enabledInPreview).map((c) => c.sourceName);
+          const plan = await MS.audioFade.prepare();
+          const when = window.MSPlaylist.planStingerTiming({ pointMs, fadeMs: plan?.ms ?? 0, restartLeadMs: STINGER_RESTART_LEAD_MS });
+          if (plan) {
+            MS.grid.logEvent(`Audio fade: out ${plan.outgoing.length}, in ${plan.incoming.length} (stinger, cut at ${pointMs} ms)`);
+            MS.audioFade.setNextInMs(plan.ms, pointMs + 1500);
+          }
+          // The incoming clip activates ~20 ms after the trigger: its restart and fade-up must already be held
+          MS.audioFade.holdFadeUpUntil(Date.now() + pointMs);
+          stingerHoldUntil = Date.now() + pointMs + 1000;
+          const videoEnded = waitForEvent('SceneTransitionVideoEnded', pointMs + 6000);
+          await obs.call('TriggerStudioModeTransition');
+          const t0 = Date.now();
+          MS.audioFade.holdFadeUpUntil(t0 + pointMs);
+          stingerHoldUntil = t0 + pointMs + 1000;
+          await Promise.all([
+            sleep(when.outDelay).then(() => MS.audioFade.fadeOut(plan, plan?.ms)),
+            sleep(when.restartDelay).then(() => Promise.all(incoming.map((n) => MS.preroll.restartIncoming(n)))),
+            sleep(pointMs).then(() => restartOnTake()),
+          ]);
+          await videoEnded;
+        } catch (err) {
+          console.error('Stinger transition failed:', err);
+          MS.grid.logEvent(`Stinger failed: ${err.message}`);
+        } finally {
+          stingerHoldUntil = 0;
+          MS.audioFade.holdFadeUpUntil(0);
+          setPending(false);
+        }
+      }
+
       async function take(sceneName) {
         if (pending) return;
         // First, load to PVW
@@ -1746,6 +1840,8 @@
         // Then transition using last-selected type
         if (lastTransitionType === 'fade') {
           await fade();
+        } else if (lastTransitionType === 'stinger' && MS.transitions.stingerName) {
+          await stinger();
         } else {
           await cut();
         }
@@ -1775,6 +1871,7 @@
       function updateButtonHighlight() {
         btnCut.classList.toggle('btn-primary', lastTransitionType === 'cut');
         btnFade.classList.toggle('btn-primary', lastTransitionType === 'fade');
+        btnStinger.classList.toggle('btn-primary', lastTransitionType === 'stinger');
       }
 
       btnCut.addEventListener('click', () => {
@@ -1789,9 +1886,15 @@
         fade(duration);
       });
 
+      btnStinger.addEventListener('click', () => {
+        lastTransitionType = 'stinger';
+        updateButtonHighlight();
+        stinger();
+      });
+
       updateButtonHighlight();
 
-      return { cut, fade, take };
+      return { cut, fade, stinger, take, stingerHolding: () => Date.now() < stingerHoldUntil };
     })();
 
     // ===== Scene Grid =====
@@ -2852,9 +2955,9 @@
 
       function setBusy(on) {
         busy = on;
-        for (const id of ['btn-cut', 'btn-fade']) {
+        for (const id of ['btn-cut', 'btn-fade', 'btn-stinger']) {
           const b = document.getElementById(id);
-          if (b) b.disabled = on || !MS.connection.connected;
+          if (b) b.disabled = on || !MS.connection.connected || (id === 'btn-stinger' && !MS.transitions.stingerName);
         }
       }
 
@@ -3055,6 +3158,7 @@
           muted: inputMuted,
           mediaState: status.mediaState,
           prerolled: MS.preroll.was(inputName),
+          skipRestart: MS.transitionControl.stingerHolding(),
           monitorType,
           streamOnlyChosen: MS.cue.streamOnlyChosen.has(inputName),
           monitorSwitchSafe: true,

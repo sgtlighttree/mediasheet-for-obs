@@ -99,12 +99,13 @@ function planLeave({ sourceName, kind, active }) {
 }
 
 // restart_on_activate is off for managed clips so MediaSheet restarts the clip itself, once, when it goes live. Resuming a cued clip with PLAY held the old picture for ~1 s while the audio ran (measured), RESTART does not.
-function planActivate({ sourceName, kind, muted, monitorType, streamOnlyChosen, monitorSwitchSafe, mediaState, prerolled }) {
+function planActivate({ sourceName, kind, muted, monitorType, streamOnlyChosen, monitorSwitchSafe, mediaState, prerolled, skipRestart }) {
   if (kind !== 'video') return [];
   const reqs = [];
   // A clip MediaSheet already restarted in Preview is playing when it goes live; restarting it again would drop its frame (~2 black frames).
   const alreadyPlaying = prerolled && mediaState === 'OBS_MEDIA_STATE_PLAYING';
-  if (mediaState && !alreadyPlaying) {
+  // During a stinger the incoming clip activates a second before it is visible; the stinger take restarts it itself, just before the cut point.
+  if (mediaState && !alreadyPlaying && !skipRestart) {
     reqs.push({ request: 'TriggerMediaInputAction', data: { inputName: sourceName, mediaAction: RESTART_ACTION } });
   }
   if (muted) reqs.push({ request: 'SetInputMute', data: { inputName: sourceName, inputMuted: false } });
@@ -119,6 +120,22 @@ function shouldIdleReset({ managed, isProgram, isPreview, enabledClipCount, trig
   if (trigger !== 'connect' && trigger !== 'leftViews') return false;
   if (isPreview && enabledClipCount === 1) return false;
   return (!isProgram && !isPreview) || enabledClipCount > 1;
+}
+
+// The cut point of OBS's stinger transition (when the picture swaps), in ms from the start. null = the transition has no video file yet.
+function stingerPointMs(settings, fps) {
+  if (!settings || !settings.path) return null;
+  const point = Number(settings.transition_point) || 0;
+  return settings.tp_type === 1 ? Math.round((point * 1000) / (fps || 30)) : point;
+}
+
+// Delays (ms after the stinger starts): outgoing audio finishes fading as the picture swaps, the incoming clip restarts just before it, and the incoming audio comes up at it.
+function planStingerTiming({ pointMs, fadeMs, restartLeadMs }) {
+  return {
+    outDelay: Math.max(0, pointMs - (fadeMs || 0)),
+    restartDelay: Math.max(0, pointMs - restartLeadMs),
+    inAt: pointMs,
+  };
 }
 
 // OBS plays every enabled clip as soon as it starts. Frames rendered since launch tell how long it has been up, so a dock reload mid-show is never mistaken for a launch.
@@ -232,6 +249,8 @@ const api = {
   shouldIdleReset,
   isFreshStart,
   selectStartupParks,
+  stingerPointMs,
+  planStingerTiming,
   shouldEvaluatePileup,
   rampValue,
   fadeLevel,
