@@ -2430,22 +2430,10 @@
       }
 
       // Register the listener before RESTART: the event can fire in the same millisecond.
-      // RESTART then PAUSE the instant playback starts can pause before the first frame is drawn, leaving a black cued frame (measured 5/5 when the clip was playing or paused). Pausing and seeking to 0 shows the real frame, so a playing or paused clip is never restarted.
-      async function parkOnFirstFrame(inputName) {
-        const obs = MS.connection.obs;
-        const { videoActive } = await obs.call('GetSourceActive', { sourceName: inputName });
-        if (videoActive) return; // a take during the cue must not freeze Program
-        await obs.call('TriggerMediaInputAction', { inputName, mediaAction: PAUSE });
-        await obs.call('SetMediaInputCursor', { inputName, mediaCursor: 0 });
-      }
-
+      // Cue: RESTART, wait for playback, give OBS ~100 ms to draw the first frame, then PAUSE. Pausing the instant PlaybackStarted fires can land before any frame exists (black cued frame, measured); seeking to 0 instead leaves a clip whose later PLAY holds the old picture for ~1 s while the audio runs (measured), so the take restarts the clip (planActivate) and the cue never seeks.
+      const CUE_FRAME_MS = 100;
       async function primeFirstFrame(inputName) {
         const obs = MS.connection.obs;
-        const { mediaState } = await obs.call('GetMediaInputStatus', { inputName });
-        if (mediaState === 'OBS_MEDIA_STATE_PLAYING' || mediaState === 'OBS_MEDIA_STATE_PAUSED') {
-          await parkOnFirstFrame(inputName);
-          return;
-        }
         let handler;
         const started = new Promise((resolve) => {
           const timer = setTimeout(() => resolve(false), 2000);
@@ -2458,65 +2446,10 @@
         } finally {
           obs.off('MediaInputPlaybackStarted', handler);
         }
-        await parkOnFirstFrame(inputName);
-      }
-
-      async function cueClip(sceneName, clipItem) {
-        if (busy || !MS.connection.connected) return;
-        setBusy(true);
-        const tileEl = MS.subgrid.clips.get(`${sceneName}|${clipItem.sceneItemId}`)?.el;
-        tileEl?.classList.add('cueing');
-        const obs = MS.connection.obs;
-        try {
-          const scan = await MS.playlists.scan(sceneName);
-          const item = scan.items.find((i) => i.sceneItemId === clipItem.sceneItemId);
-          if (!item) throw new Error('Clip is no longer in the scene');
-          const activeFlags = await Promise.all(scan.items.map((i) =>
-            obs.call('GetSourceActive', { sourceName: i.sourceName }).then((r) => r.videoActive).catch(() => false)));
-          const active = new Set(scan.items.filter((_, i) => activeFlags[i]).map((i) => i.sourceName));
-
-          const { currentProgramSceneName, currentPreviewSceneName } = await obs.call('GetSceneList');
-          if (currentProgramSceneName === sceneName) {
-            const dup = await sceneDuplication();
-            if (dup !== 'true' || !sawTransitionEnd) {
-              const why = dup !== 'true'
-                ? 'Duplicate Scene is not confirmed on'
-                : 'no transition has been seen since MediaSheet connected';
-              const ok = await MS.confirm(
-                `"${sceneName}" is on Program and ${why}. Cueing could change what is live right now.`,
-                'Cue anyway');
-              if (!ok) return;
-            }
-          }
-
-          const monitorType = item.kind === 'video'
-            ? (await obs.call('GetInputAudioMonitorType', { inputName: item.sourceName })).monitorType
-            : '';
-          const reqs = P.planCue({
-            sceneName,
-            clip: item,
-            items: scan.items,
-            active,
-            monitorType,
-            streamOnlyChosen: streamOnlyChosen.has(item.sourceName),
-          });
-          if (currentPreviewSceneName !== sceneName) {
-            await obs.call('SetCurrentPreviewScene', { sceneName });
-          }
-          for (const r of reqs) await obs.call(r.request, r.data);
-          if (item.kind === 'video' && !active.has(item.sourceName)) await primeFirstFrame(item.sourceName);
-
-          if (scan.detection.auto && !MS.store.get().managed.includes(sceneName)) {
-            await MS.manager.setManaged(sceneName, true);
-          }
-          MS.grid.logEvent(`Cued: ${item.sourceName}`);
-        } catch (err) {
-          console.error('Cue failed:', err);
-          MS.grid.logEvent(`Cue failed: ${err.message}`);
-        } finally {
-          tileEl?.classList.remove('cueing');
-          setBusy(false);
-        }
+        await new Promise((r) => setTimeout(r, CUE_FRAME_MS));
+        // A take during the cue must not freeze Program
+        const { videoActive } = await obs.call('GetSourceActive', { sourceName: inputName });
+        if (!videoActive) await obs.call('TriggerMediaInputAction', { inputName, mediaAction: PAUSE });
       }
 
       async function restartLive(item) {

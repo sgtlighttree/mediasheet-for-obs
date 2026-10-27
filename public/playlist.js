@@ -13,7 +13,6 @@ const MONITOR = {
 const MONITOR_NONE = MONITOR.stream;
 const MONITOR_BOTH = MONITOR.both;
 const STOP_ACTION = 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP';
-const PLAY_ACTION = 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY';
 const RESTART_ACTION = 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART';
 const PILEUP_SETTLE_MS = 1500;
 
@@ -99,13 +98,11 @@ function planLeave({ sourceName, kind, active }) {
   return [{ request: 'SetInputMute', data: { inputName: sourceName, inputMuted: true } }];
 }
 
-// restart_on_activate is off for managed clips: OBS's restart drops the cued first frame and shows ~2 black frames. The cued clip is resumed instead.
+// restart_on_activate is off for managed clips so MediaSheet restarts the clip itself, once, when it goes live. Resuming a cued clip with PLAY held the old picture for ~1 s while the audio ran (measured), RESTART does not.
 function planActivate({ sourceName, kind, muted, monitorType, streamOnlyChosen, monitorSwitchSafe, mediaState }) {
   if (kind !== 'video') return [];
   const reqs = [];
-  if (mediaState === 'OBS_MEDIA_STATE_PAUSED') {
-    reqs.push({ request: 'TriggerMediaInputAction', data: { inputName: sourceName, mediaAction: PLAY_ACTION } });
-  } else if (mediaState === 'OBS_MEDIA_STATE_ENDED' || mediaState === 'OBS_MEDIA_STATE_STOPPED') {
+  if (mediaState) {
     reqs.push({ request: 'TriggerMediaInputAction', data: { inputName: sourceName, mediaAction: RESTART_ACTION } });
   }
   if (muted) reqs.push({ request: 'SetInputMute', data: { inputName: sourceName, inputMuted: false } });
