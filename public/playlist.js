@@ -149,6 +149,14 @@ function planAutoplay({ order, live, loop, leadMs }) {
   return { act: 'advance', next, takeInMs, cueNow: takeInMs <= AUTOPLAY_CUE_AHEAD_MS };
 }
 
+// Manual override: when the operator cues or takes something by hand, autoplay stands down until the live clip changes (their take lands). With the playback lock on, hand presses are blocked, so autoplay never yields.
+// heldFor: null = not holding, otherwise the name of the live clip it stood down on ('' = none was live).
+function planOverride({ locked, manualAt, lastAdvanceAt, heldFor, liveName }) {
+  if (heldFor !== null && heldFor !== undefined) return liveName !== heldFor ? { act: 'release' } : { act: 'hold' };
+  if (!locked && manualAt > lastAdvanceAt) return { act: 'hold-now' };
+  return { act: 'run' };
+}
+
 // How long before a clip's end each transition has to start, counting what the take does first.
 function autoplayLeadMs({ transition, audioFadeMs, fadeMs, stingerPointMs }) {
   if (transition === 'cut') return audioFadeMs;
@@ -319,6 +327,7 @@ const api = {
   stingerPointMs,
   planStingerTiming,
   planAutoplay,
+  planOverride,
   autoplayLeadMs,
   AUTOPLAY_CUE_AHEAD_MS,
   shouldEvaluatePileup,

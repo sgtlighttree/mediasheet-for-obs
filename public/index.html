@@ -194,6 +194,23 @@
       pointer-events: none;
     }
     .subgrid-head .auto-badge { position: static; align-self: center; margin-right: 8px; }
+    .auto-badge.held { background: #B7791F; }
+    .auto-badge.locked { background: #B3261E; }
+    .lock-banner {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 12px;
+      background: #B3261E;
+      color: #fff;
+      font-size: 12px;
+      flex-shrink: 0;
+    }
+    .lock-banner .lock-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lock-banner.flash { animation: lock-flash 0.6s; }
+    @keyframes lock-flash { 0%, 100% { background: #B3261E; } 40% { background: #FF6B5E; } }
+    .lock-banner .lock-unlock { background: rgba(0,0,0,0.35); border-color: rgba(255,255,255,0.6); color: #fff; }
+    body.ms-locked .tile:not(.pl-locked-tile), body.ms-locked .clip-tile, body.ms-locked .btn-transition { opacity: 0.55; cursor: not-allowed; }
     .pl-menu {
       position: fixed;
       z-index: 60;
@@ -777,6 +794,13 @@
 </head>
 <body>
   <!-- Top Bar -->
+  <!-- Playback lock: shown while a locked autoplay playlist is live on Program -->
+  <div id="lock-banner" class="lock-banner" hidden>
+    <strong>🔒 PLAYBACK LOCKED</strong>
+    <span id="lock-text" class="lock-text"></span>
+    <button id="lock-unlock" class="btn lock-unlock">Unlock</button>
+  </div>
+
   <header id="top-bar">
     <div class="top-bar-center">
       <button id="btn-add-input" class="btn" disabled>Add Input</button>
@@ -1065,6 +1089,8 @@
           // Per playlist scene: autoplay (set and forget), loop the playlist, and the transition between clips
           playlistOptions: Object.fromEntries(Object.entries(v?.playlistOptions && typeof v.playlistOptions === 'object' ? v.playlistOptions : {}).map(([scene, o]) => [scene, {
             autoplay: o?.autoplay === true,
+            // Playback lock: while this playlist is live on Program, MediaSheet ignores presses on other scenes, clips and the transition buttons
+            lock: o?.lock === true,
             loop: o?.loop !== false,
             transition: ['cut', 'fade', 'stinger'].includes(o?.transition) ? o.transition : 'fade',
           }])),
@@ -2215,11 +2241,15 @@
       }
 
       btnCut.addEventListener('click', () => {
+        if (MS.autoplay.guard()) return;
+        MS.autoplay.noteManual();
         lastTransitionType = 'cut';
         updateButtonHighlight();
         cut();
       });
       btnFade.addEventListener('click', () => {
+        if (MS.autoplay.guard()) return;
+        MS.autoplay.noteManual();
         lastTransitionType = 'fade';
         updateButtonHighlight();
         const duration = parseInt(fadeDurationInput.value, 10) || 300;
@@ -2227,6 +2257,8 @@
       });
 
       btnStinger.addEventListener('click', () => {
+        if (MS.autoplay.guard()) return;
+        MS.autoplay.noteManual();
         lastTransitionType = 'stinger';
         updateButtonHighlight();
         stinger();
@@ -2374,6 +2406,8 @@
 
         // Click → PVW
         tile.addEventListener('click', () => {
+          if (MS.autoplay.guard()) return;
+          MS.autoplay.noteManual();
           if (MS.connection.connected) {
             MS.connection.obs.call('SetCurrentPreviewScene', { sceneName: tile.dataset.scene })
               .catch((err) => console.error('SetCurrentPreviewScene failed:', err));
@@ -2382,6 +2416,8 @@
 
         // Double-click → Take to PGM
         tile.addEventListener('dblclick', () => {
+          if (MS.autoplay.guard()) return;
+          MS.autoplay.noteManual();
           if (MS.connection.connected && MS.transitions) {
             MS.transitionControl.take(tile.dataset.scene);
           }
@@ -2746,7 +2782,7 @@
       }
 
       btnRemove.addEventListener('click', async () => {
-        if (!targetScene) return;
+        if (!targetScene || MS.autoplay.guard()) return;
         try {
           await MS.connection.obs.call('RemoveScene', { sceneName: targetScene });
         } catch (err) {
@@ -2859,6 +2895,7 @@
         restart.hidden = true;
         restart.addEventListener('click', (e) => {
           e.stopPropagation();
+          if (MS.autoplay.guard()) return;
           MS.cue.restartLive(item);
         });
         el.appendChild(restart);
@@ -2867,7 +2904,11 @@
         const cueable = !!MS.playlists.getScan(sceneName)?.detection.auto;
         if (cueable) {
           el.classList.add('cueable');
-          el.addEventListener('click', () => MS.cue.cueClip(sceneName, item));
+          el.addEventListener('click', () => {
+            if (MS.autoplay.guard()) return;
+            MS.autoplay.noteManual();
+            MS.cue.cueClip(sceneName, item);
+          });
         }
 
         const name = document.createElement('div');
@@ -3079,20 +3120,31 @@
       // AUTO badge on the tile and in the box header while autoplay is armed: set and forget needs the state visible
       function paintAuto(sceneName) {
         const on = !!MS.store.get().playlistOptions[sceneName]?.autoplay;
+        const held = on && MS.autoplay.isHeld(sceneName);
+        const locked = on && !!MS.store.get().playlistOptions[sceneName]?.lock;
+        const text = held ? 'AUTO · HELD' : locked ? 'AUTO 🔒' : 'AUTO';
+        const title = held ? 'Autoplay stood down because of a manual cue; it resumes when your take lands'
+          : locked ? 'Autoplay is on with Playback lock: presses on other scenes and clips are ignored while this playlist is live'
+          : 'Autoplay is on for this playlist';
+        const style = (el) => {
+          el.textContent = text;
+          el.title = title;
+          el.classList.toggle('held', held);
+          el.classList.toggle('locked', locked && !held);
+        };
         const tile = MS.grid.getTile(sceneName);
         if (tile) {
           let badge = tile.el.querySelector(':scope > .auto-badge');
           if (on && !badge) {
             badge = document.createElement('span');
             badge.className = 'auto-badge';
-            badge.textContent = 'AUTO';
-            badge.title = 'Autoplay is on for this playlist';
             tile.el.appendChild(badge);
           }
-          if (!on) badge?.remove();
+          if (on) style(badge);
+          else badge?.remove();
         }
         const head = rows.get(sceneName)?.querySelector('.head-auto');
-        if (head) head.hidden = !on;
+        if (head) { head.hidden = !on; if (on) style(head); }
       }
 
       function displayedItems(scan) {
@@ -3776,10 +3828,45 @@
       let leaseTimer = null;
 
       const obs = () => MS.connection.obs;
-      const defaults = { autoplay: false, loop: true, transition: 'fade' };
+      const defaults = { autoplay: false, lock: false, loop: true, transition: 'fade' };
       const opts = (scene) => MS.store.get().playlistOptions[scene] ?? defaults;
       const isArmed = (scene) => !!MS.store.get().playlistOptions[scene]?.autoplay;
       const armedScenes = () => Object.entries(MS.store.get().playlistOptions).filter(([, o]) => o.autoplay).map(([s]) => s);
+
+      // ---- playback lock and manual override ----
+      // Presses (scene tiles, clips, CUT/FADE/STINGER) call noteManual(); the engine stands down when one lands after its last advance, so it never takes the clip the operator just cued by hand.
+      // While a locked playlist is live on Program, guard() swallows those presses instead.
+      let manualAt = 0;
+      const noteManual = () => { manualAt = Date.now(); };
+      const lockedScene = () => armedScenes().find((s) => opts(s).lock && s === MS.grid.currentPgm && MS.manager.isManagedPlaylist(s)) ?? null;
+      const isLocked = (scene) => lockedScene() === scene;
+      const isHeld = (scene) => states.get(scene)?.heldFor != null;
+
+      const banner = document.getElementById('lock-banner');
+      const bannerText = document.getElementById('lock-text');
+      document.getElementById('lock-unlock').addEventListener('click', () => {
+        const s = lockedScene();
+        if (s) setOptions(s, { lock: false }).catch((err) => console.error('Unlock failed:', err));
+      });
+
+      // true = the press was blocked
+      function guard() {
+        if (!lockedScene()) return false;
+        banner.classList.remove('flash');
+        void banner.offsetWidth; // restart the animation
+        banner.classList.add('flash');
+        return true;
+      }
+
+      function paintLock() {
+        const scene = lockedScene();
+        banner.hidden = !scene;
+        document.body.classList.toggle('ms-locked', !!scene);
+        if (scene) bannerText.textContent = `${scene}: autoplay is running. Presses on scenes, clips and transitions are ignored. Untick Playback lock in Playlist Options (or Unlock) to take control.`;
+        for (const [name, tile] of MS.grid.tiles) tile.el.classList.toggle('pl-locked-tile', name === scene);
+        for (const s of armedScenes()) MS.subgrid.paintAuto(s);
+      }
+      setInterval(paintLock, 500);
 
       function waitForEvent(name, timeoutMs) {
         return new Promise((resolve) => {
@@ -3805,7 +3892,7 @@
       }
 
       function stateFor(scene) {
-        if (!states.has(scene)) states.set(scene, { timer: null, dueAt: 0, cuedFor: null, advancing: false });
+        if (!states.has(scene)) states.set(scene, { timer: null, dueAt: 0, cuedFor: null, advancing: false, lastAdvanceAt: Date.now(), heldFor: null, liveName: '' });
         return states.get(scene);
       }
 
@@ -3839,13 +3926,40 @@
         });
       }
 
+      // Is Preview still exactly what autoplay cued: this playlist with only that clip enabled? A take fires whatever is in Preview.
+      async function previewIsOurs(scene, clip) {
+        const { currentPreviewSceneName } = await obs().call('GetSceneList');
+        if (currentPreviewSceneName !== scene) return false;
+        const scan = await MS.playlists.scan(scene);
+        const enabled = scan.items.filter((i) => i.enabled && i.kind === 'video').map((i) => i.sourceName);
+        return enabled.length === 1 && enabled[0] === clip.sourceName;
+      }
+
+      function hold(scene, st, why) {
+        clearTimeout(st.timer);
+        st.timer = null;
+        st.cuedFor = null;
+        st.heldFor = st.liveName ?? '';
+        MS.grid.logEvent(`Autoplay held for ${scene}: ${why}`);
+        MS.subgrid.paintAuto(scene);
+      }
+
       // Cue (if the clip is not cued yet), then take. Returns whether a take happened.
       async function advance(scene, clip) {
         const st = stateFor(scene);
         if (st.advancing || !holder || scene !== MS.grid.currentPgm) return false;
+        // A press since the last advance means the operator is steering: never take their cue
+        if (!isLocked(scene) && manualAt > st.lastAdvanceAt) { hold(scene, st, 'manual cue'); return false; }
         st.advancing = true;
         try {
           if (st.cuedFor !== clip.sourceName) {
+            if (!(await MS.cue.cueClip(scene, clip, { auto: true }))) return false;
+            st.cuedFor = clip.sourceName;
+          }
+          if (!(await previewIsOurs(scene, clip))) {
+            if (!isLocked(scene)) { hold(scene, st, 'Preview was changed'); return false; }
+            // Locked: put our cue back rather than take whatever got into Preview
+            st.cuedFor = null;
             if (!(await MS.cue.cueClip(scene, clip, { auto: true }))) return false;
             st.cuedFor = clip.sourceName;
           }
@@ -3855,6 +3969,7 @@
           st.cuedFor = null;
           await ended;
           await new Promise((r) => setTimeout(r, 1500));
+          st.lastAdvanceAt = Date.now();
           return true;
         } catch (err) {
           console.error('Autoplay advance failed:', err);
@@ -3882,6 +3997,16 @@
           live.push({ sourceName: c.sourceName, state: s.mediaState, cursor: s.mediaCursor, duration: s.mediaDuration });
         }
         const o = opts(scene);
+        st.liveName = (live.find((c) => c.state === 'OBS_MEDIA_STATE_PLAYING') ?? live[live.length - 1])?.sourceName ?? '';
+        const ov = P.planOverride({ locked: isLocked(scene), manualAt, lastAdvanceAt: st.lastAdvanceAt, heldFor: st.heldFor, liveName: st.liveName });
+        if (ov.act === 'hold-now') { hold(scene, st, 'manual cue'); return; }
+        if (ov.act === 'hold') { reset(scene); return; }
+        if (ov.act === 'release') {
+          st.heldFor = null;
+          st.lastAdvanceAt = Date.now();
+          MS.grid.logEvent(`Autoplay resumed for ${scene}`);
+          MS.subgrid.paintAuto(scene);
+        }
         const plan = P.planAutoplay({ order, live, loop: o.loop, leadMs: leadMs(scene) });
 
         if (plan.act === 'start') {
@@ -3946,11 +4071,14 @@
           }
         }
         await MS.store.update((d) => ({ ...d, playlistOptions: { ...d.playlistOptions, [scene]: { ...(d.playlistOptions[scene] ?? defaults), ...patch } } }));
+        // Turning autoplay on or off starts from a clean slate (no stale hold or cue)
+        if ('autoplay' in patch) { reset(scene); states.delete(scene); }
         MS.subgrid.paintAuto(scene);
+        paintLock();
         return { ok: true };
       }
 
-      return { start, stop, setOptions, opts, isArmed };
+      return { start, stop, setOptions, opts, isArmed, isLocked, isHeld, guard, noteManual };
     })();
 
     // ===== Playlist Options Popover =====
@@ -3986,6 +4114,8 @@
         };
         const check = (checked) => Object.assign(document.createElement('input'), { type: 'checkbox', checked });
         const autoBox = check(o.autoplay);
+        const lockBox = check(o.lock);
+        lockBox.disabled = !o.autoplay;
         const loopBox = check(o.loop);
 
         const sel = document.createElement('select');
@@ -4004,15 +4134,19 @@
           msg.textContent = r.message ?? '';
           if (!r.ok) undo?.();
         };
-        autoBox.addEventListener('change', () => apply({ autoplay: autoBox.checked }, () => { autoBox.checked = !autoBox.checked; }));
+        autoBox.addEventListener('change', async () => {
+          await apply({ autoplay: autoBox.checked }, () => { autoBox.checked = !autoBox.checked; });
+          lockBox.disabled = !autoBox.checked;
+        });
+        lockBox.addEventListener('change', () => apply({ lock: lockBox.checked }, () => { lockBox.checked = !lockBox.checked; }));
         loopBox.addEventListener('change', () => apply({ loop: loopBox.checked }));
         sel.addEventListener('change', () => apply({ transition: sel.value }));
 
         const note = document.createElement('p');
         note.className = 'pl-note';
-        note.textContent = 'Plays the clips in the order shown, only while this playlist is on Program. Pause the live clip to hold. A clip you cue by hand is replaced at the next advance. It runs in this dock: keep the dock open and the Mac awake.';
+        note.textContent = 'Plays the clips in the order shown, only while this playlist is on Program. Pause the live clip to hold. If you cue or take something by hand, autoplay stands down until your take lands. Playback lock ignores those presses instead (OBS\'s own buttons still work; autoplay puts its cue back). It runs in this dock: keep the dock open and the Mac awake.';
 
-        menu.append(title, row('Autoplay (set and forget)', autoBox), row('Loop the playlist', loopBox), selLabel, msg, note);
+        menu.append(title, row('Autoplay (set and forget)', autoBox), row('Playback lock (ignore other presses while live)', lockBox), row('Loop the playlist', loopBox), selLabel, msg, note);
         document.body.appendChild(menu);
         const r = at instanceof Element ? at.getBoundingClientRect() : { left: at.x, bottom: at.y };
         const w = menu.offsetWidth;

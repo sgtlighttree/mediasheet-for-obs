@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { planAutoplay, autoplayLeadMs } = require('../public/playlist.js');
+const { planAutoplay, planOverride, autoplayLeadMs } = require('../public/playlist.js');
 
 const PLAYING = 'OBS_MEDIA_STATE_PLAYING';
 const PAUSED = 'OBS_MEDIA_STATE_PAUSED';
@@ -70,6 +70,30 @@ describe('planAutoplay', () => {
   it('with several live clips it follows the playing one', () => {
     const live = [{ sourceName: 'A', state: ENDED }, playing('B', 1000)];
     assert.equal(planAutoplay({ order, live, loop: true, leadMs: 400 }).next.sourceName, 'C');
+  });
+});
+
+describe('planOverride', () => {
+  const base = { locked: false, manualAt: 0, lastAdvanceAt: 1000, heldFor: null, liveName: 'A' };
+  it('runs when nothing was pressed since the last advance', () => {
+    assert.equal(planOverride(base).act, 'run');
+  });
+  it('stands down when the operator pressed something after the last advance', () => {
+    assert.equal(planOverride({ ...base, manualAt: 2000 }).act, 'hold-now');
+  });
+  it('an older press does not count', () => {
+    assert.equal(planOverride({ ...base, manualAt: 500 }).act, 'run');
+  });
+  it('keeps holding while the same clip is live, releases when the live clip changes', () => {
+    assert.equal(planOverride({ ...base, manualAt: 2000, heldFor: 'A' }).act, 'hold');
+    assert.equal(planOverride({ ...base, manualAt: 2000, heldFor: 'A', liveName: 'Z' }).act, 'release');
+  });
+  it('holding on "nothing live" releases when something goes live', () => {
+    assert.equal(planOverride({ ...base, heldFor: '', liveName: '' }).act, 'hold');
+    assert.equal(planOverride({ ...base, heldFor: '', liveName: 'Z' }).act, 'release');
+  });
+  it('with the lock on, presses never make it yield', () => {
+    assert.equal(planOverride({ ...base, locked: true, manualAt: 2000 }).act, 'run');
   });
 });
 
