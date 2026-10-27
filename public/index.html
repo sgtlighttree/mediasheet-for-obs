@@ -1501,7 +1501,10 @@
         }
       }
 
-      return { run, was: (inputName) => Date.now() - (recent.get(inputName) ?? -Infinity) < WINDOW_MS };
+      // Typical run() time (gather, mute, restart, first frame, settle); a CUT starts it this long before the fade-out ends so the clip is only just playing when it goes live
+      const LEAD_MS = 300;
+
+      return { run, LEAD_MS, was: (inputName) => Date.now() - (recent.get(inputName) ?? -Infinity) < WINDOW_MS };
     })();
 
     // ===== Transition Control =====
@@ -1530,8 +1533,11 @@
             MS.grid.logEvent(`Audio fade: out ${plan.outgoing.length}, in ${plan.incoming.length}`);
             MS.audioFade.setNextInMs(plan.ms);
           }
-          // The incoming clip is restarted in Preview while the outgoing audio fades, so a Cut adds little or no delay
-          const [rolled] = await Promise.all([MS.preroll.run(), plan ? MS.audioFade.fadeOut(plan) : null]);
+          // The incoming clip is restarted in Preview near the end of the outgoing audio fade, so a Cut adds little or no delay and the clip is not already seconds in when it appears
+          const fading = plan ? MS.audioFade.fadeOut(plan) : null;
+          const lead = plan?.outgoing.length ? Math.max(0, plan.ms - MS.preroll.LEAD_MS) : 0;
+          const rolling = new Promise((r) => setTimeout(r, lead)).then(() => MS.preroll.run());
+          const [rolled] = await Promise.all([rolling, fading]);
           if (rolled.length) MS.grid.logEvent(`Pre-rolled ${rolled.length} clip(s)`);
           if (MS.transitions.cutName) {
             await MS.connection.obs.call('SetCurrentSceneTransition', {
