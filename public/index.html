@@ -96,6 +96,31 @@
     .btn:disabled:hover { background: var(--ms-button-bg); }
     .btn.busy { opacity: 0.6; }
 
+    /* === Live clip transport === */
+    .live-transport {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 34px;
+      padding: 0 12px;
+      background: var(--ms-bg-base);
+      border-top: 1px solid var(--ms-border);
+      flex-shrink: 0;
+      font-size: 12px;
+    }
+    .live-transport .btn-icon { font-size: 15px; min-width: 28px; }
+    .lt-tag {
+      flex-shrink: 0;
+      padding: 1px 6px;
+      border-radius: var(--ms-radius-sm);
+      background: var(--ms-tally-pgm);
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .lt-name { flex: 0 1 200px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lt-time { flex-shrink: 0; color: var(--ms-text-muted); font-variant-numeric: tabular-nums; }
+    .lt-seek { flex: 1; min-width: 80px; accent-color: var(--ms-primary-light); }
+
     .btn-primary {
       background: var(--ms-primary);
       border-color: var(--ms-primary-dark);
@@ -635,6 +660,16 @@
     <button id="ctx-remove" class="context-menu-item">Remove Input</button>
   </div>
 
+  <!-- Live clip transport: acts on the clip live on Program, not on OBS's selected source -->
+  <div id="live-transport" class="live-transport" hidden>
+    <span class="lt-tag">PGM</span>
+    <button id="lt-toggle" class="btn btn-icon" title="Pause / play the clip on Program">⏸</button>
+    <button id="lt-restart" class="btn btn-icon" title="Restart the clip on Program from the start">↺</button>
+    <span id="lt-name" class="lt-name"></span>
+    <span id="lt-time" class="lt-time">0:00 / 0:00</span>
+    <input type="range" id="lt-seek" class="lt-seek" min="0" max="1000" value="0" title="Seek (OBS snaps to the nearest earlier keyframe)">
+  </div>
+
   <!-- Bottom Bar -->
   <footer id="bottom-bar">
     <span class="pgm-label">PGM: <strong id="pgm-name">—</strong></span>
@@ -964,6 +999,7 @@
       if (MS.manager) MS.manager.onConnect().catch((err) => console.error('Manager init failed:', err));
       if (MS.audioCheck) MS.audioCheck.run().catch(() => {});
       MS.audioFade.recover().catch(() => {});
+      MS.liveTransport.refresh().catch(() => {});
     }
 
     function onDisconnected() {
@@ -971,6 +1007,7 @@
       document.getElementById('btn-hold-frames').disabled = true;
       document.getElementById('btn-cut').disabled = true;
       document.getElementById('btn-fade').disabled = true;
+      MS.liveTransport.stop();
     }
 
     MS.connection.onConnect = onConnected;
@@ -1264,6 +1301,128 @@
       }
 
       return { prepare, fadeOut, setNextInMs, recover, gather };
+    })();
+
+    // ===== Live Clip Transport =====
+    // OBS's own media bar follows the *selected* source and obs-websocket cannot change that, so this strip follows whatever clip is live on Program.
+    MS.liveTransport = (() => {
+      const P = window.MSPlaylist;
+      const POLL_MS = 250;
+      const strip = document.getElementById('live-transport');
+      const toggle = document.getElementById('lt-toggle');
+      const restart = document.getElementById('lt-restart');
+      const nameEl = document.getElementById('lt-name');
+      const timeEl = document.getElementById('lt-time');
+      const seek = document.getElementById('lt-seek');
+      const durations = new Map(); // inputName → last known duration (ms); OBS reports null once a clip has ended
+      let current = null;
+      let lastState = null;
+      let dragging = false;
+      let pollTimer = null;
+      let refreshTimer = null;
+
+      const obs = () => MS.connection.obs;
+      const action = (a) => obs().call('TriggerMediaInputAction', { inputName: current, mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_' + a });
+
+      async function findLive() {
+        const scene = MS.grid.currentPgm;
+        if (!scene || !MS.connection.connected) return null;
+        const scan = await MS.playlists.scan(scene).catch(() => null);
+        const videos = (scan?.items ?? []).filter((i) => i.kind === 'video');
+        const flags = await Promise.all(videos.map((i) =>
+          obs().call('GetSourceActive', { sourceName: i.sourceName }).then((r) => r.videoActive).catch(() => false)));
+        const live = videos.filter((_, i) => flags[i]).map((i) => i.sourceName);
+        if (!live.length) return null;
+        return live.includes(current) ? current : live[live.length - 1];
+      }
+
+      function paint(state, cursor, duration) {
+        toggle.textContent = state === 'OBS_MEDIA_STATE_PLAYING' ? '⏸' : state === 'OBS_MEDIA_STATE_PAUSED' ? '▶' : '⟲';
+        toggle.title = state === 'OBS_MEDIA_STATE_PLAYING' ? 'Pause the clip on Program'
+          : state === 'OBS_MEDIA_STATE_PAUSED' ? 'Play the clip on Program' : 'Restart the clip on Program';
+        if (dragging) return;
+        const shown = state === 'OBS_MEDIA_STATE_ENDED' ? duration : cursor;
+        timeEl.textContent = `${P.formatClock(shown)} / ${P.formatClock(duration)}`;
+        seek.value = duration > 0 ? Math.min(1000, Math.round(((shown ?? 0) / duration) * 1000)) : 0;
+        seek.disabled = !(duration > 0);
+      }
+
+      async function poll() {
+        if (!current) return;
+        try {
+          const st = await obs().call('GetMediaInputStatus', { inputName: current });
+          if (typeof st.mediaDuration === 'number') durations.set(current, st.mediaDuration);
+          lastState = st.mediaState;
+          paint(st.mediaState, st.mediaCursor, durations.get(current) ?? null);
+        } catch {
+          scheduleRefresh();
+        }
+      }
+
+      async function refresh() {
+        const next = await findLive().catch(() => null);
+        current = next;
+        strip.hidden = !next;
+        clearInterval(pollTimer);
+        pollTimer = null;
+        if (!next) return;
+        nameEl.textContent = next;
+        nameEl.title = next;
+        await poll();
+        pollTimer = setInterval(poll, POLL_MS);
+      }
+
+      function scheduleRefresh() {
+        clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(() => refresh().catch((err) => console.error('Transport refresh failed:', err)), 150);
+      }
+
+      function stop() {
+        current = null;
+        clearInterval(pollTimer);
+        pollTimer = null;
+        strip.hidden = true;
+      }
+
+      toggle.addEventListener('click', async () => {
+        if (!current) return;
+        await action(P.transportAction(lastState)).catch((err) => console.error('Transport action failed:', err));
+        poll();
+      });
+      restart.addEventListener('click', async () => {
+        if (!current) return;
+        await action('RESTART').catch((err) => console.error('Transport restart failed:', err));
+        poll();
+      });
+      seek.addEventListener('input', () => {
+        dragging = true;
+        const duration = durations.get(current);
+        const target = P.seekTarget(Number(seek.value), 1000, duration);
+        if (target !== null) timeEl.textContent = `${P.formatClock(target)} / ${P.formatClock(duration)}`;
+      });
+      seek.addEventListener('change', async () => {
+        const name = current;
+        const target = P.seekTarget(Number(seek.value), 1000, durations.get(name));
+        dragging = false;
+        if (!name || target === null) return;
+        try {
+          // OBS ignores a seek on a clip that is not playing or paused
+          if (lastState !== 'OBS_MEDIA_STATE_PLAYING' && lastState !== 'OBS_MEDIA_STATE_PAUSED') {
+            await action('RESTART');
+            await new Promise((r) => setTimeout(r, 150));
+          }
+          await obs().call('SetMediaInputCursor', { inputName: name, mediaCursor: target });
+        } catch (err) {
+          console.error('Transport seek failed:', err);
+        }
+        poll();
+      });
+
+      obs().on('InputActiveStateChanged', scheduleRefresh);
+      obs().on('CurrentProgramSceneChanged', scheduleRefresh);
+      obs().on('SceneTransitionEnded', scheduleRefresh);
+
+      return { refresh, stop };
     })();
 
     // ===== Transition Control =====

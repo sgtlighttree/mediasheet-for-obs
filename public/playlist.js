@@ -153,6 +153,27 @@ function selectFadeTargets(candidates) {
   return { outgoing, incoming };
 }
 
+// PLAY on an ENDED clip freezes at frame 1 in OBS 32.2.2 (measured), so anything that is not playing or paused is restarted.
+function transportAction(mediaState) {
+  if (mediaState === 'OBS_MEDIA_STATE_PLAYING') return 'PAUSE';
+  if (mediaState === 'OBS_MEDIA_STATE_PAUSED') return 'PLAY';
+  return 'RESTART';
+}
+
+function formatClock(ms) {
+  const total = Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = String(total % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+}
+
+function seekTarget(position, max, durationMs) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
+  const t = Math.min(1, Math.max(0, position / max));
+  return Math.round(t * durationMs);
+}
+
 const api = {
   EXT,
   classifyItem,
@@ -168,6 +189,9 @@ const api = {
   rampValue,
   fadeLevel,
   selectFadeTargets,
+  transportAction,
+  formatClock,
+  seekTarget,
 };
 
 if (typeof module !== 'undefined') module.exports = api;
