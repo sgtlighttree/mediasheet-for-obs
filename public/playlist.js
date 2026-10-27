@@ -194,6 +194,39 @@ function transportAction(mediaState) {
   return 'RESTART';
 }
 
+// Music strip dropdown: every audio file found in a scene, grouped per scene, scenes and tracks A-Z.
+function groupAudioTracks(scans) {
+  const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true });
+  const groups = [];
+  for (const sc of scans) {
+    const seen = new Set();
+    const tracks = [];
+    for (const item of sc.items ?? []) {
+      if (item.kind !== 'audio' || !item.file || seen.has(item.file)) continue;
+      seen.add(item.file);
+      tracks.push({ file: item.file, label: item.file.split(/[\\/]/).pop(), sourceName: item.sourceName });
+    }
+    if (tracks.length) groups.push({ scene: sc.sceneName, tracks: tracks.sort((a, b) => byName(a.label, b.label)) });
+  }
+  return groups.sort((a, b) => byName(a.scene, b.scene));
+}
+
+// A scene that holds only audio files is a sound bed, not something to cut to (MediaSheet's own [MS] file scenes stay).
+function isAudioOnlyScene(items) {
+  return items.length > 0 && items.every((i) => i.kind === 'audio');
+}
+
+// Music volume slider: 0 = silent, 1-100 = -60 dB .. 0 dB
+function sliderToMul(v) {
+  const n = Math.max(0, Math.min(100, Number(v) || 0));
+  return n === 0 ? 0 : Math.pow(10, (-60 + (60 * n) / 100) / 20);
+}
+
+function mulToSlider(mul) {
+  if (!(mul > 0.001)) return 0;
+  return Math.max(0, Math.min(100, Math.round(((20 * Math.log10(mul) + 60) / 60) * 100)));
+}
+
 function formatClock(ms) {
   const total = Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0;
   const h = Math.floor(total / 3600);
@@ -258,6 +291,10 @@ const api = {
   fadeLevel,
   selectFadeTargets,
   transportAction,
+  groupAudioTracks,
+  isAudioOnlyScene,
+  sliderToMul,
+  mulToSlider,
   formatClock,
   seekTarget,
   selectRetake,

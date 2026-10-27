@@ -141,6 +141,43 @@
     .lt-time { flex-shrink: 0; color: var(--ms-text-muted); font-variant-numeric: tabular-nums; }
     .lt-seek { flex: 1; min-width: 80px; accent-color: var(--ms-primary-light); }
 
+    /* === Music strip === */
+    .music-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 34px;
+      padding: 0 12px;
+      background: var(--ms-bg-base);
+      border-top: 1px solid var(--ms-border);
+      flex-shrink: 0;
+      font-size: 12px;
+    }
+    .music-strip .btn-icon { font-size: 15px; min-width: 28px; }
+    .mu-tag {
+      flex-shrink: 0;
+      padding: 1px 6px;
+      border-radius: var(--ms-radius-sm);
+      background: var(--ms-primary-dark);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .mu-track {
+      flex: 0 1 230px;
+      min-width: 0;
+      height: 24px;
+      background: var(--ms-bg-raised, #1f2430);
+      color: inherit;
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius-sm);
+      font-size: 12px;
+    }
+    .mu-time { flex-shrink: 0; color: var(--ms-text-muted); font-variant-numeric: tabular-nums; }
+    .mu-seek { flex: 1; min-width: 60px; accent-color: var(--ms-primary-light); }
+    .mu-vol { flex: 0 0 72px; accent-color: var(--ms-primary-light); }
+    .mu-warn { flex: 1; color: #E8B93A; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .music-strip.off > :not(.mu-tag):not(.mu-warn) { display: none; }
+
     .btn-primary {
       background: var(--ms-primary);
       border-color: var(--ms-primary-dark);
@@ -787,6 +824,19 @@
     <button id="ctx-remove" class="context-menu-item">Remove Input</button>
   </div>
 
+  <!-- Music: background audio on its own OBS player source (see obs-scripts/mediasheet-music.lua); never part of a scene, cut or fade -->
+  <div id="music-strip" class="music-strip" hidden>
+    <span class="mu-tag">♪</span>
+    <select id="mu-track" class="mu-track" title="Background music track (grouped per scene)"></select>
+    <button id="mu-toggle" class="btn btn-icon" title="Play / pause the music">▶</button>
+    <button id="mu-restart" class="btn btn-icon" title="Restart the track">↺</button>
+    <span id="mu-time" class="mu-time">0:00 / 0:00</span>
+    <input type="range" id="mu-seek" class="mu-seek" min="0" max="1000" value="0" title="Seek">
+    <input type="range" id="mu-vol" class="mu-vol" min="0" max="100" value="89" title="Music volume">
+    <button id="mu-loop" class="btn btn-icon" title="Loop the track">⟳</button>
+    <span id="mu-warn" class="mu-warn" hidden></span>
+  </div>
+
   <!-- Live clip transport: acts on the clip live on Program, not on OBS's selected source -->
   <div id="live-transport" class="live-transport" hidden>
     <span class="lt-tag">PGM</span>
@@ -1152,6 +1202,7 @@
       if (MS.audioCheck) MS.audioCheck.run().catch(() => {});
       MS.audioFade.recover().catch(() => {});
       MS.liveTransport.refresh().catch(() => {});
+      MS.music.refresh().catch((err) => console.error('Music init failed:', err));
     }
 
     function onDisconnected() {
@@ -1161,6 +1212,7 @@
       document.getElementById('btn-fade').disabled = true;
       document.getElementById('btn-stinger').disabled = true;
       MS.liveTransport.stop();
+      MS.music.stop();
     }
 
     MS.connection.onConnect = onConnected;
@@ -1607,6 +1659,206 @@
       obs().on('InputActiveStateChanged', scheduleRefresh);
       obs().on('CurrentProgramSceneChanged', scheduleRefresh);
       obs().on('SceneTransitionEnded', scheduleRefresh);
+
+      return { refresh, stop };
+    })();
+
+    // ===== Music =====
+    // Background audio on its own player source ("MediaSheet Music", kept on an always-on output channel by obs-scripts/mediasheet-music.lua). It is in no scene, so it never takes part in cuts, fades, stingers or the clip logic: this strip only sends it a file, play/pause, seek, volume and loop.
+    MS.music = (() => {
+      const P = window.MSPlaylist;
+      const PLAYER = 'MediaSheet Music';
+      const POLL_MS = 500;
+      const el = (id) => document.getElementById(id);
+      const strip = el('music-strip');
+      const select = el('mu-track');
+      const toggle = el('mu-toggle');
+      const restart = el('mu-restart');
+      const timeEl = el('mu-time');
+      const seek = el('mu-seek');
+      const vol = el('mu-vol');
+      const loop = el('mu-loop');
+      const warn = el('mu-warn');
+      let pollTimer = null;
+      let refreshTimer = null;
+      let lastState = null;
+      let duration = null;
+      let dragging = false;
+      let ready = false;
+      let looping = false;
+      let polls = 0;
+
+      const obs = () => MS.connection.obs;
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const action = (a) => obs().call('TriggerMediaInputAction', { inputName: PLAYER, mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_' + a });
+
+      async function loadGroups() {
+        const { scenes } = await obs().call('GetSceneList');
+        const scans = await Promise.all(scenes.map((s) => MS.playlists.scan(s.sceneName).catch(() => null)));
+        return P.groupAudioTracks(scans.filter(Boolean));
+      }
+
+      async function readPlayer() {
+        try {
+          const [{ inputSettings }, { videoActive }] = await Promise.all([
+            obs().call('GetInputSettings', { inputName: PLAYER }),
+            obs().call('GetSourceActive', { sourceName: PLAYER }),
+          ]);
+          return { exists: true, active: videoActive, settings: inputSettings };
+        } catch {
+          return { exists: false };
+        }
+      }
+
+      function fillSelect(groups, file) {
+        select.replaceChildren(new Option('Choose a track…', ''));
+        for (const g of groups) {
+          const og = document.createElement('optgroup');
+          og.label = g.scene;
+          for (const t of g.tracks) og.append(new Option(t.label, t.file));
+          select.append(og);
+        }
+        select.value = file ?? '';
+        if (select.value !== (file ?? '')) select.value = '';
+      }
+
+      function setReady(on, message) {
+        ready = on;
+        strip.classList.toggle('off', !on);
+        warn.hidden = on;
+        warn.textContent = message ?? '';
+        warn.title = message ?? '';
+      }
+
+      function paint(state, cursor) {
+        const playing = state === 'OBS_MEDIA_STATE_PLAYING';
+        toggle.textContent = playing ? '⏸' : '▶';
+        toggle.title = playing ? 'Pause the music' : state === 'OBS_MEDIA_STATE_PAUSED' ? 'Play the music' : 'Play the track from the start';
+        const none = !select.value;
+        toggle.disabled = none;
+        restart.disabled = none;
+        if (dragging) return;
+        const shown = state === 'OBS_MEDIA_STATE_ENDED' ? duration : cursor;
+        timeEl.textContent = `${P.formatClock(shown)} / ${P.formatClock(duration)}`;
+        seek.value = duration > 0 ? Math.min(1000, Math.round(((shown ?? 0) / duration) * 1000)) : 0;
+        seek.disabled = none || !(duration > 0);
+      }
+
+      async function poll() {
+        if (!MS.connection.connected) return;
+        try {
+          if (!ready) {
+            const p = await readPlayer();
+            if (p.exists && p.active) scheduleRefresh();
+            return;
+          }
+          const st = await obs().call('GetMediaInputStatus', { inputName: PLAYER });
+          if (typeof st.mediaDuration === 'number') duration = st.mediaDuration;
+          lastState = st.mediaState;
+          paint(st.mediaState, st.mediaCursor);
+          // The player can disappear (script unloaded) or stop being routed while the strip is open
+          if (++polls % 6 === 0) {
+            const p = await readPlayer();
+            if (!p.exists || !p.active) scheduleRefresh();
+          }
+        } catch {
+          scheduleRefresh();
+        }
+      }
+
+      async function refresh() {
+        if (!MS.connection.connected) return;
+        const [groups, player] = await Promise.all([loadGroups().catch(() => []), readPlayer()]);
+        strip.hidden = !(groups.length || player.exists);
+        if (!pollTimer && !strip.hidden) pollTimer = setInterval(poll, POLL_MS);
+        if (!player.exists) {
+          setReady(false, 'No music player in OBS: load obs-scripts/mediasheet-music.lua (OBS > Tools > Scripts)');
+          return;
+        }
+        if (!player.active) {
+          setReady(false, 'Music not routed: reload obs-scripts/mediasheet-music.lua (check Tools > Scripts > Script Log)');
+          return;
+        }
+        fillSelect(groups, player.settings.local_file);
+        looping = player.settings.looping === true;
+        loop.classList.toggle('btn-primary', looping);
+        try {
+          const { inputVolumeMul } = await obs().call('GetInputVolume', { inputName: PLAYER });
+          vol.value = P.mulToSlider(inputVolumeMul);
+        } catch {}
+        setReady(true);
+        poll();
+      }
+
+      function scheduleRefresh() {
+        clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(() => refresh().catch((err) => console.error('Music refresh failed:', err)), 300);
+      }
+
+      function stop() {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        strip.hidden = true;
+        ready = false;
+      }
+
+      select.addEventListener('change', async () => {
+        const file = select.value;
+        if (!file) return;
+        try {
+          await obs().call('SetInputSettings', { inputName: PLAYER, inputSettings: { local_file: file, is_local_file: true }, overlay: true });
+          // OBS opens the new file (and may start it); make sure it plays from the top
+          await sleep(150);
+          await action('RESTART');
+          MS.grid.logEvent(`Music: ${select.selectedOptions[0]?.textContent ?? file}`);
+        } catch (err) {
+          console.error('Music track change failed:', err);
+          MS.grid.logEvent(`Music failed: ${err.message}`);
+        }
+        poll();
+      });
+      toggle.addEventListener('click', async () => {
+        await action(P.transportAction(lastState)).catch((err) => console.error('Music action failed:', err));
+        poll();
+      });
+      restart.addEventListener('click', async () => {
+        await action('RESTART').catch((err) => console.error('Music restart failed:', err));
+        poll();
+      });
+      seek.addEventListener('input', () => {
+        dragging = true;
+        const target = P.seekTarget(Number(seek.value), 1000, duration);
+        if (target !== null) timeEl.textContent = `${P.formatClock(target)} / ${P.formatClock(duration)}`;
+      });
+      seek.addEventListener('change', async () => {
+        const target = P.seekTarget(Number(seek.value), 1000, duration);
+        dragging = false;
+        if (target === null) return;
+        try {
+          if (lastState !== 'OBS_MEDIA_STATE_PLAYING' && lastState !== 'OBS_MEDIA_STATE_PAUSED') {
+            await action('RESTART');
+            await sleep(150);
+          }
+          await obs().call('SetMediaInputCursor', { inputName: PLAYER, mediaCursor: target });
+        } catch (err) {
+          console.error('Music seek failed:', err);
+        }
+        poll();
+      });
+      vol.addEventListener('input', () => {
+        obs().call('SetInputVolume', { inputName: PLAYER, inputVolumeMul: P.sliderToMul(vol.value) }).catch(() => {});
+      });
+      loop.addEventListener('click', async () => {
+        looping = !looping;
+        loop.classList.toggle('btn-primary', looping);
+        await obs().call('SetInputSettings', { inputName: PLAYER, inputSettings: { looping }, overlay: true })
+          .catch((err) => console.error('Music loop failed:', err));
+      });
+
+      obs().on('InputSettingsChanged', (d) => { if (d.inputName === PLAYER) scheduleRefresh(); });
+      obs().on('InputCreated', (d) => { if (d.inputName === PLAYER) scheduleRefresh(); });
+      obs().on('InputRemoved', (d) => { if (d.inputName === PLAYER) scheduleRefresh(); });
+      for (const ev of ['SceneCreated', 'SceneRemoved', 'SceneNameChanged', 'SceneItemCreated', 'SceneItemRemoved']) obs().on(ev, scheduleRefresh);
 
       return { refresh, stop };
     })();
@@ -2168,6 +2420,8 @@
           for (const scene of [...scenes].reverse()) {
             if (!tiles.has(scene.sceneName)) {
               const scan = await MS.playlists.scan(scene.sceneName).catch(() => null);
+              // A scene that only holds audio files is a sound bed for the music strip, not something to cut to
+              if (scan && !isMediaSheet(scene.sceneName) && window.MSPlaylist.isAudioOnlyScene(scan.items)) continue;
               const isPlaylist = !!scan?.detection.auto;
               const isMedia = isMediaSheet(scene.sceneName) && !isPlaylist;
               const inputName = isMedia
