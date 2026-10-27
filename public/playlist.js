@@ -30,6 +30,8 @@ function classifyItem(item) {
   const ext = extensionOf(item.localFile);
   if (EXT.image.includes(ext)) return 'image';
   if (EXT.audio.includes(ext)) return 'audio';
+  // A video marked Loop in OBS is a background, not a clip: never cued, soloed, parked or normalized
+  if (item.looping === true) return 'loop';
   return 'video';
 }
 
@@ -62,7 +64,7 @@ function planCue({ sceneName, clip, items, active, monitorType, streamOnlyChosen
   const reqs = [];
   for (const item of items) {
     if (item.sceneItemId === clip.sceneItemId) continue;
-    if (!item.enabled) continue;
+    if (!item.enabled || item.kind === 'loop') continue;
     reqs.push(sceneItemEnabled(sceneName, item.sceneItemId, false));
   }
   reqs.push(sceneItemEnabled(sceneName, clip.sceneItemId, true));
