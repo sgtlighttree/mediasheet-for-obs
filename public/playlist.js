@@ -151,8 +151,12 @@ function planAutoplay({ order, live, loop, leadMs }) {
 
 // Manual override: when the operator cues or takes something by hand, autoplay stands down until the live clip changes (their take lands). With the playback lock on, hand presses are blocked, so autoplay never yields.
 // heldFor: null = not holding, otherwise the name of the live clip it stood down on ('' = none was live).
-function planOverride({ locked, manualAt, lastAdvanceAt, heldFor, liveName }) {
-  if (heldFor !== null && heldFor !== undefined) return liveName !== heldFor ? { act: 'release' } : { act: 'hold' };
+// A hold also ends when the held clip has ended with nothing new taken: otherwise previewing something and not taking it would stall the playlist on the last frame.
+function planOverride({ locked, manualAt, lastAdvanceAt, heldFor, liveName, liveEnded = false }) {
+  if (heldFor !== null && heldFor !== undefined) {
+    if (liveName !== heldFor || liveEnded) return { act: 'release' };
+    return { act: 'hold' };
+  }
   if (!locked && manualAt > lastAdvanceAt) return { act: 'hold-now' };
   return { act: 'run' };
 }

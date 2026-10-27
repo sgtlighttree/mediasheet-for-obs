@@ -1088,6 +1088,8 @@
           streamOnly: Array.isArray(v?.streamOnly) ? v.streamOnly : [],
           // Per playlist scene: autoplay (set and forget), loop the playlist, and the transition between clips
           playlistOptions: Object.fromEntries(Object.entries(v?.playlistOptions && typeof v.playlistOptions === 'object' ? v.playlistOptions : {}).map(([scene, o]) => [scene, {
+            // Unknown fields survive (a newer field must not be stripped by an older dock)
+            ...(o && typeof o === 'object' ? o : {}),
             autoplay: o?.autoplay === true,
             // Playback lock: while this playlist is live on Program, MediaSheet ignores presses on other scenes, clips and the transition buttons
             lock: o?.lock === true,
@@ -3123,7 +3125,8 @@
         const held = on && MS.autoplay.isHeld(sceneName);
         const locked = on && !!MS.store.get().playlistOptions[sceneName]?.lock;
         const text = held ? 'AUTO · HELD' : locked ? 'AUTO 🔒' : 'AUTO';
-        const title = held ? 'Autoplay stood down because of a manual cue; it resumes when your take lands'
+        const why = MS.autoplay.heldWhy(sceneName) || 'manual cue';
+        const title = held ? `Autoplay stood down (${why}). Click to resume now; it also resumes when your take lands or the clip ends.`
           : locked ? 'Autoplay is on with Playback lock: presses on other scenes and clips are ignored while this playlist is live'
           : 'Autoplay is on for this playlist';
         const style = (el) => {
@@ -3131,6 +3134,11 @@
           el.title = title;
           el.classList.toggle('held', held);
           el.classList.toggle('locked', locked && !held);
+          // The HELD badge is a button: click to resume (stopPropagation so the tile underneath is not previewed or taken)
+          el.style.pointerEvents = held ? 'auto' : '';
+          el.style.cursor = held ? 'pointer' : '';
+          el.onclick = held ? (e) => { e.stopPropagation(); MS.autoplay.resume(sceneName); } : null;
+          el.ondblclick = held ? (e) => e.stopPropagation() : null;
         };
         const tile = MS.grid.getTile(sceneName);
         if (tile) {
@@ -3940,7 +3948,19 @@
         st.timer = null;
         st.cuedFor = null;
         st.heldFor = st.liveName ?? '';
+        st.heldWhy = why;
         MS.grid.logEvent(`Autoplay held for ${scene}: ${why}`);
+        MS.subgrid.paintAuto(scene);
+      }
+
+      // Clicking the HELD badge: carry on with the list now
+      function resume(scene) {
+        const st = states.get(scene);
+        if (!st || st.heldFor == null) return;
+        st.heldFor = null;
+        st.heldWhy = '';
+        st.lastAdvanceAt = Date.now();
+        MS.grid.logEvent(`Autoplay resumed for ${scene}`);
         MS.subgrid.paintAuto(scene);
       }
 
@@ -3982,7 +4002,14 @@
 
       async function tickScene(scene) {
         const st = stateFor(scene);
-        if (scene !== MS.grid.currentPgm || !MS.manager.isManagedPlaylist(scene)) { reset(scene); return; }
+        if (scene !== MS.grid.currentPgm || !MS.manager.isManagedPlaylist(scene)) { reset(scene); st.onPgm = false; return; }
+        // Coming onto Program starts fresh: the press that brought the playlist in (double-click, CUT) must not count as a manual override
+        if (!st.onPgm) {
+          st.onPgm = true;
+          st.heldFor = null;
+          st.lastAdvanceAt = Date.now();
+          MS.subgrid.paintAuto(scene);
+        }
         if (st.advancing || MS.transitionControl.isPending() || MS.cue.busy) return;
         const scan = await MS.playlists.scan(scene);
         if (!scan.detection.auto || scan.detection.kind !== 'video') return;
@@ -3997,12 +4024,15 @@
           live.push({ sourceName: c.sourceName, state: s.mediaState, cursor: s.mediaCursor, duration: s.mediaDuration });
         }
         const o = opts(scene);
-        st.liveName = (live.find((c) => c.state === 'OBS_MEDIA_STATE_PLAYING') ?? live[live.length - 1])?.sourceName ?? '';
-        const ov = P.planOverride({ locked: isLocked(scene), manualAt, lastAdvanceAt: st.lastAdvanceAt, heldFor: st.heldFor, liveName: st.liveName });
+        const cur = live.find((c) => c.state === 'OBS_MEDIA_STATE_PLAYING') ?? live[live.length - 1];
+        st.liveName = cur?.sourceName ?? '';
+        const liveEnded = !!cur && (cur.state === 'OBS_MEDIA_STATE_ENDED' || cur.state === 'OBS_MEDIA_STATE_STOPPED');
+        const ov = P.planOverride({ locked: isLocked(scene), manualAt, lastAdvanceAt: st.lastAdvanceAt, heldFor: st.heldFor, liveName: st.liveName, liveEnded });
         if (ov.act === 'hold-now') { hold(scene, st, 'manual cue'); return; }
         if (ov.act === 'hold') { reset(scene); return; }
         if (ov.act === 'release') {
           st.heldFor = null;
+          st.heldWhy = '';
           st.lastAdvanceAt = Date.now();
           MS.grid.logEvent(`Autoplay resumed for ${scene}`);
           MS.subgrid.paintAuto(scene);
@@ -4078,7 +4108,7 @@
         return { ok: true };
       }
 
-      return { start, stop, setOptions, opts, isArmed, isLocked, isHeld, guard, noteManual };
+      return { start, stop, setOptions, opts, isArmed, isLocked, isHeld, heldWhy: (scene) => states.get(scene)?.heldWhy ?? '', resume, guard, noteManual };
     })();
 
     // ===== Playlist Options Popover =====

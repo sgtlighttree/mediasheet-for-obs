@@ -92,6 +92,10 @@ describe('planOverride', () => {
     assert.equal(planOverride({ ...base, heldFor: '', liveName: '' }).act, 'hold');
     assert.equal(planOverride({ ...base, heldFor: '', liveName: 'Z' }).act, 'release');
   });
+  it('releases a hold when the held clip has ended and nothing new was taken', () => {
+    assert.equal(planOverride({ ...base, heldFor: 'A', liveName: 'A', liveEnded: true }).act, 'release');
+    assert.equal(planOverride({ ...base, heldFor: 'A', liveName: 'A', liveEnded: false }).act, 'hold');
+  });
   it('with the lock on, presses never make it yield', () => {
     assert.equal(planOverride({ ...base, locked: true, manualAt: 2000 }).act, 'run');
   });
