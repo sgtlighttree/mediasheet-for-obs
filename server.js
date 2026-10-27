@@ -3,6 +3,7 @@ const path = require('path');
 const { resolveFile } = require('./lib/resolve');
 const { readSceneDuplication } = require('./lib/obsconfig');
 const { createThumbService } = require('./lib/thumbs');
+const { createAudioDeviceService } = require('./lib/audiodevices');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -14,6 +15,7 @@ function isLoopback(req) {
 
 const THUMB_CACHE_DIR = path.join(__dirname, 'cache', 'thumbs');
 const thumbs = createThumbService({ cacheDir: THUMB_CACHE_DIR });
+const audioDevices = createAudioDeviceService();
 const THUMB_ERRORS = { 400: 'bad_path', 404: 'not_found', 415: 'unsupported_type', 503: 'unavailable' };
 
 app.use(express.json());
@@ -22,6 +24,11 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/api/obs-config', async (req, res) => {
   if (!isLoopback(req)) return res.status(403).json({ error: 'forbidden' });
   res.json({ sceneDuplication: await readSceneDuplication() });
+});
+
+app.get('/api/audio-devices', async (req, res) => {
+  if (!isLoopback(req)) return res.status(403).json({ error: 'forbidden' });
+  res.json({ defaultOutput: await audioDevices.getDefaultOutput() });
 });
 
 app.get('/api/thumb', async (req, res) => {
