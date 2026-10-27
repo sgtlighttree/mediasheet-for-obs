@@ -1288,6 +1288,7 @@
         try {
           const plan = await MS.audioFade.prepare();
           if (plan) {
+            MS.grid.logEvent(`Audio fade: out ${plan.outgoing.length}, in ${plan.incoming.length}`);
             MS.audioFade.setNextInMs(plan.ms);
             await MS.audioFade.fadeOut(plan);
           }
@@ -1322,6 +1323,7 @@
           }
           // The room hears monitored audio before the transition mixes it, so the clips fade over the same time as the picture.
           if (plan) {
+            MS.grid.logEvent(`Audio fade: out ${plan.outgoing.length}, in ${plan.incoming.length}`);
             MS.audioFade.setNextInMs(durationMs);
             MS.audioFade.fadeOut(plan, durationMs);
           }
@@ -2414,14 +2416,16 @@
       async function onActive(inputName) {
         const hit = managedSceneFor(inputName);
         if (!hit || hit.clip.kind !== 'video') return;
-        const [{ inputMuted }, { monitorType }] = await Promise.all([
+        const [{ inputMuted }, { monitorType }, status] = await Promise.all([
           obs.call('GetInputMute', { inputName }),
           obs.call('GetInputAudioMonitorType', { inputName }),
+          obs.call('GetMediaInputStatus', { inputName }).catch(() => ({})),
         ]);
         await run(P.planActivate({
           sourceName: inputName,
           kind: hit.clip.kind,
           muted: inputMuted,
+          mediaState: status.mediaState,
           monitorType,
           streamOnlyChosen: MS.cue.streamOnlyChosen.has(inputName),
           monitorSwitchSafe: true,
@@ -2478,7 +2482,7 @@
         let changed = 0;
         for (const clip of scan.detection.clips) {
           if (clip.kind !== 'video') continue;
-          if (await normalizeInput(clip.sourceName, { clear_on_media_end: false, restart_on_activate: true })) changed++;
+          if (await normalizeInput(clip.sourceName, { clear_on_media_end: false, restart_on_activate: false })) changed++;
         }
         if (changed) MS.grid.logEvent(`Normalized ${changed} clip(s) in ${sceneName}`);
         return changed;
@@ -2699,7 +2703,7 @@
               inputSettings: {
                 local_file: filePath,
                 is_local_file: true,
-                restart_on_activate: true,
+                restart_on_activate: false,
                 close_when_inactive: false,
                 clear_on_media_end: false,
               },

@@ -13,6 +13,8 @@ const MONITOR = {
 const MONITOR_NONE = MONITOR.stream;
 const MONITOR_BOTH = MONITOR.both;
 const STOP_ACTION = 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP';
+const PLAY_ACTION = 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY';
+const RESTART_ACTION = 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART';
 const PILEUP_SETTLE_MS = 1500;
 
 function extensionOf(file) {
@@ -97,9 +99,15 @@ function planLeave({ sourceName, kind, active }) {
   return [{ request: 'SetInputMute', data: { inputName: sourceName, inputMuted: true } }];
 }
 
-function planActivate({ sourceName, kind, muted, monitorType, streamOnlyChosen, monitorSwitchSafe }) {
+// restart_on_activate is off for managed clips: OBS's restart drops the cued first frame and shows ~2 black frames. The cued clip is resumed instead.
+function planActivate({ sourceName, kind, muted, monitorType, streamOnlyChosen, monitorSwitchSafe, mediaState }) {
   if (kind !== 'video') return [];
   const reqs = [];
+  if (mediaState === 'OBS_MEDIA_STATE_PAUSED') {
+    reqs.push({ request: 'TriggerMediaInputAction', data: { inputName: sourceName, mediaAction: PLAY_ACTION } });
+  } else if (mediaState === 'OBS_MEDIA_STATE_ENDED' || mediaState === 'OBS_MEDIA_STATE_STOPPED') {
+    reqs.push({ request: 'TriggerMediaInputAction', data: { inputName: sourceName, mediaAction: RESTART_ACTION } });
+  }
   if (muted) reqs.push({ request: 'SetInputMute', data: { inputName: sourceName, inputMuted: false } });
   if (monitorSwitchSafe && monitorType === MONITOR_NONE && !streamOnlyChosen) {
     reqs.push({ request: 'SetInputAudioMonitorType', data: { inputName: sourceName, monitorType: MONITOR_BOTH } });
