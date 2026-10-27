@@ -121,6 +121,30 @@ function shouldEvaluatePileup({ transitioning, msSinceTransitionEnd, liveClips }
   return msSinceTransitionEnd >= PILEUP_SETTLE_MS;
 }
 
+function rampValue(from, to, t) {
+  if (t <= 0) return from;
+  if (t >= 1) return to;
+  return from + (to - from) * t;
+}
+
+// level = the volume a clip should have when live: what was remembered before it was parked, unless the user raised it since.
+function fadeLevel(remembered, current) {
+  return typeof remembered === 'number' ? Math.max(remembered, current) : current;
+}
+
+function selectFadeTargets(candidates) {
+  const outgoing = [];
+  const incoming = [];
+  for (const c of candidates) {
+    if (c.live && !c.enabledInPreview && !c.muted && c.mul > 0) {
+      outgoing.push({ sourceName: c.sourceName, mul: c.mul, level: c.level });
+    } else if (!c.live && c.enabledInPreview && c.level > 0) {
+      incoming.push({ sourceName: c.sourceName, level: c.level });
+    }
+  }
+  return { outgoing, incoming };
+}
+
 const api = {
   EXT,
   classifyItem,
@@ -133,6 +157,9 @@ const api = {
   planActivate,
   shouldIdleReset,
   shouldEvaluatePileup,
+  rampValue,
+  fadeLevel,
+  selectFadeTargets,
 };
 
 if (typeof module !== 'undefined') module.exports = api;
