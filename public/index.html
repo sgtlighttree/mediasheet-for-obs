@@ -94,6 +94,7 @@
     .btn:active { background: var(--ms-button-down); }
     .btn:disabled { opacity: 0.4; cursor: default; }
     .btn:disabled:hover { background: var(--ms-button-bg); }
+    .btn.busy { opacity: 0.6; }
 
     .btn-primary {
       background: var(--ms-primary);
@@ -1193,21 +1194,24 @@
       async function prepare() {
         const ms = MS.store.get().audioFadeMs;
         if (!ms || !MS.connection.connected) return null;
+        let abandoned = false;
         try {
           const plan = await Promise.race([
             (async () => {
               const targets = await gather();
-              if (!targets.outgoing.length && !targets.incoming.length) return null;
+              if (abandoned || (!targets.outgoing.length && !targets.incoming.length)) return null;
               const entries = {};
               for (const e of [...targets.outgoing, ...targets.incoming]) entries[e.sourceName] = e.level;
               await MS.store.update((d) => ({ ...d, fadeRestore: { ...d.fadeRestore, ...entries } }));
+              // Parking after the take has fired would leave a live clip silent with no activation event to bring it back.
+              if (abandoned) return null;
               await Promise.all(targets.incoming.map((e) => {
                 ramps.set(e.sourceName, ++rampSeq);
                 return setMul(e.sourceName, 0);
               }));
               return { ...targets, ms };
             })(),
-            sleep(PREPARE_TIMEOUT_MS).then(() => null),
+            sleep(PREPARE_TIMEOUT_MS).then(() => { abandoned = true; return null; }),
           ]);
           return plan;
         } catch (err) {
@@ -1268,9 +1272,18 @@
       const btnFade = document.getElementById('btn-fade');
       const fadeDurationInput = document.getElementById('fade-duration');
       let lastTransitionType = 'cut'; // 'cut' or 'fade'
+      // A second take during the audio pre-roll would swap Preview/Program back, so presses are ignored until the first finishes.
+      let pending = false;
+
+      function setPending(on) {
+        pending = on;
+        btnCut.classList.toggle('busy', on);
+        btnFade.classList.toggle('busy', on);
+      }
 
       async function cut() {
-        if (!MS.connection.connected) return;
+        if (!MS.connection.connected || pending) return;
+        setPending(true);
         lastTransitionType = 'cut';
         try {
           const plan = await MS.audioFade.prepare();
@@ -1287,11 +1300,14 @@
           await restartOnTake();
         } catch (err) {
           console.error('Cut transition failed:', err);
+        } finally {
+          setPending(false);
         }
       }
 
       async function fade(durationMs) {
-        if (!MS.connection.connected) return;
+        if (!MS.connection.connected || pending) return;
+        setPending(true);
         lastTransitionType = 'fade';
         durationMs = durationMs || parseInt(fadeDurationInput.value, 10) || 300;
         try {
@@ -1313,10 +1329,13 @@
           await restartOnTake();
         } catch (err) {
           console.error('Fade transition failed:', err);
+        } finally {
+          setPending(false);
         }
       }
 
       async function take(sceneName) {
+        if (pending) return;
         // First, load to PVW
         try {
           await MS.connection.obs.call('SetCurrentPreviewScene', { sceneName });
