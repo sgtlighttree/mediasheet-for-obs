@@ -57,7 +57,7 @@
       flex-shrink: 0;
     }
 
-    .top-bar-left, .top-bar-center, .top-bar-right {
+    .top-bar-center, .top-bar-right {
       display: flex;
       align-items: center;
       gap: 8px;
@@ -342,7 +342,7 @@
     .audio-chip.warn { background: var(--ms-warning); border-color: var(--ms-warning); }
     .audio-pop {
       position: fixed;
-      top: 34px;
+      bottom: 36px;
       left: 8px;
       z-index: 150;
       max-width: 360px;
@@ -551,6 +551,12 @@
     }
     .pgm-label strong { color: var(--ms-tally-pgm); }
     .pvw-label strong { color: var(--ms-tally-pvw); }
+    .connection-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
     .last-event {
       margin-left: auto;
       color: var(--ms-text-muted);
@@ -561,13 +567,6 @@
 <body>
   <!-- Top Bar -->
   <header id="top-bar">
-    <div class="top-bar-left">
-      <span id="connection-dot" class="status-dot disconnected"></span>
-      <span id="connection-text">Disconnected</span>
-      <span id="server-status" class="server-status" hidden>Server offline</span>
-      <button id="audio-chip" class="audio-chip" hidden></button>
-    </div>
-    <div id="audio-pop" class="audio-pop" hidden></div>
     <div class="top-bar-center">
       <button id="btn-add-input" class="btn" disabled>Add Input</button>
       <button id="btn-hold-frames" class="btn" disabled title="Make every media source in OBS hold its last frame instead of going black">Hold Frames</button>
@@ -635,8 +634,15 @@
   <footer id="bottom-bar">
     <span class="pgm-label">PGM: <strong id="pgm-name">—</strong></span>
     <span class="pvw-label">PVW: <strong id="pvw-name">—</strong></span>
+    <button id="audio-chip" class="audio-chip" hidden></button>
     <span id="last-event" class="last-event"></span>
+    <span id="server-status" class="server-status" hidden>Server offline</span>
+    <span class="connection-status">
+      <span id="connection-dot" class="status-dot disconnected"></span>
+      <span id="connection-text">Disconnected</span>
+    </span>
   </footer>
+  <div id="audio-pop" class="audio-pop" hidden></div>
 
   <script src="vendor/obs-websocket-js.min.js"></script>
   <script src="playlist.js"></script>
