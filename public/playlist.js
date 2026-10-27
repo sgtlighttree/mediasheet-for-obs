@@ -307,6 +307,23 @@ function dropSide(clientX, rect) {
   return clientX < rect.left + rect.width / 2 ? 'before' : 'after';
 }
 
+// Display sequence for the scene grid. Tiles keep their order; a playlist's full-width box goes after the LAST tile of its tile's row (a row is `cols` tiles wide), so the tiles after an expanded playlist fill the row beside it instead of leaving a hole. Two boxes in one row stack in tile order; `joined` marks the tile whose box sits directly under the row (the others cannot join visually).
+function layoutSequence(order, hasBox, cols) {
+  const n = Math.max(1, Math.floor(cols) || 1);
+  const seq = [];
+  for (let i = 0; i < order.length; i += n) {
+    const chunk = order.slice(i, i + n);
+    for (const name of chunk) seq.push({ type: 'tile', name });
+    let first = true;
+    for (const name of chunk) {
+      if (!hasBox(name)) continue;
+      seq.push({ type: 'box', name, joined: first });
+      first = false;
+    }
+  }
+  return seq;
+}
+
 function mergeOrder(saved, current) {
   const have = new Set(current);
   const out = [];
@@ -347,6 +364,7 @@ const api = {
   seekTarget,
   selectRetake,
   moveBefore,
+  layoutSequence,
   dropSide,
   mergeOrder,
 };

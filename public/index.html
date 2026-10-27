@@ -449,6 +449,13 @@
       margin-bottom: -10px; /* grid gap (8) + the box's top border (2) */
       padding-bottom: 16px;
     }
+    /* Two expanded playlists in one row: their boxes stack, so only the first tile can join its box */
+    .tile.pl-open.pl-nojoin {
+      border-bottom: 2px solid var(--pl-color);
+      border-radius: var(--ms-radius-lg);
+      margin-bottom: 0;
+      padding-bottom: 6px;
+    }
     .tile.pl .tile-label::before {
       content: '';
       display: inline-block;
@@ -2508,15 +2515,24 @@
       }
 
       // Saved order first, scenes it has not seen yet after it (in OBS order); a playlist's box follows its tile
+      // Boxes go after the last tile of their tile's row (see layoutSequence), so the tiles after an expanded playlist fill the row beside it
+      let lastCols = 0;
+      function columnCount() {
+        return Math.max(1, getComputedStyle(container).gridTemplateColumns.split(' ').filter(Boolean).length);
+      }
       function applyOrder() {
         const order = window.MSPlaylist.mergeOrder(MS.store.get().sceneOrder, [...tiles.keys()]);
         const boxes = new Map([...container.querySelectorAll('.subgrid-row')].map((r) => [r.dataset.scene, r]));
-        for (const name of order) {
-          container.appendChild(tiles.get(name).el);
-          const row = boxes.get(name);
-          if (row) container.appendChild(row);
-        }
+        lastCols = columnCount();
+        const seq = window.MSPlaylist.layoutSequence(order, (name) => boxes.has(name), lastCols);
+        const wanted = seq.map((s) => (s.type === 'tile' ? tiles.get(s.name).el : boxes.get(s.name)));
+        // Only the tile whose box sits directly under its row can join it
+        for (const s of seq) if (s.type === 'box') tiles.get(s.name)?.el.classList.toggle('pl-nojoin', !s.joined);
+        const current = [...container.children].filter((el) => wanted.includes(el));
+        if (current.length === wanted.length && current.every((el, i) => el === wanted[i])) return;
+        for (const el of wanted) container.appendChild(el);
       }
+      new ResizeObserver(() => { if (columnCount() !== lastCols) applyOrder(); }).observe(container);
 
       async function moveScene(from, to, after = false) {
         const names = [...tiles.keys()];
@@ -3279,6 +3295,7 @@
         }
         tile.el.after(row);
         rows.set(sceneName, row);
+        MS.grid.applyOrder(); // puts the box after the last tile of its row
         decorate(sceneName);
         for (const [k, c] of clips) if (k.startsWith(sceneName + '|')) loadRoute(c);
         refreshTally(sceneName);

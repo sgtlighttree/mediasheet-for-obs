@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { moveBefore, dropSide, mergeOrder } = require('../public/playlist.js');
+const { moveBefore, layoutSequence, dropSide, mergeOrder } = require('../public/playlist.js');
 
 describe('moveBefore', () => {
   it('moves an item to just before the target', () => {
@@ -29,6 +29,31 @@ describe('moveBefore with after', () => {
 
   it('lets a tile go before the first one again', () => {
     assert.deepEqual(moveBefore(['a', 'b', 'c'], 'c', 'a', false), ['c', 'a', 'b']);
+  });
+});
+
+describe('layoutSequence', () => {
+  const names = (seq) => seq.map((s) => (s.type === 'box' ? `[${s.name}]` : s.name));
+  it('puts a playlist box after the last tile of its row so later tiles fill the row beside it', () => {
+    const seq = layoutSequence(['a', 'b', 'c', 'd', 'e'], (n) => n === 'b', 3);
+    assert.deepEqual(names(seq), ['a', 'b', 'c', '[b]', 'd', 'e']);
+  });
+  it('a playlist that is last in its row keeps its box right after it', () => {
+    assert.deepEqual(names(layoutSequence(['a', 'b', 'c', 'd'], (n) => n === 'c', 3)), ['a', 'b', 'c', '[c]', 'd']);
+  });
+  it('two boxes in one row stack in tile order and only the first is joined', () => {
+    const seq = layoutSequence(['a', 'b', 'c', 'd'], (n) => n === 'a' || n === 'c', 3);
+    assert.deepEqual(names(seq), ['a', 'b', 'c', '[a]', '[c]', 'd']);
+    assert.deepEqual(seq.filter((s) => s.type === 'box').map((s) => s.joined), [true, false]);
+  });
+  it('one column puts every box right under its tile', () => {
+    assert.deepEqual(names(layoutSequence(['a', 'b'], () => true, 1)), ['a', '[a]', 'b', '[b]']);
+  });
+  it('more columns than tiles is a single row', () => {
+    assert.deepEqual(names(layoutSequence(['a', 'b'], (n) => n === 'a', 5)), ['a', 'b', '[a]']);
+  });
+  it('an unknown column count is treated as one', () => {
+    assert.deepEqual(names(layoutSequence(['a', 'b'], (n) => n === 'a', 0)), ['a', '[a]', 'b']);
   });
 });
 
