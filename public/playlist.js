@@ -181,6 +181,23 @@ function selectRetake(candidates) {
   return staying.map((c) => ({ sourceName: c.sourceName, mul: c.mul, level: c.level }));
 }
 
+// Display order (scenes, clips) lives in MediaSheet only: OBS has no scene reorder request and its item order is the layer order.
+function moveBefore(order, from, to) {
+  if (from === to) return order.slice();
+  const next = order.filter((x) => x !== from);
+  const at = next.indexOf(to);
+  next.splice(at < 0 ? next.length : at, 0, from);
+  return next;
+}
+
+function mergeOrder(saved, current) {
+  const have = new Set(current);
+  const out = [];
+  for (const x of Array.isArray(saved) ? saved : []) if (have.has(x) && !out.includes(x)) out.push(x);
+  for (const x of current) if (!out.includes(x)) out.push(x);
+  return out;
+}
+
 const api = {
   EXT,
   classifyItem,
@@ -200,6 +217,8 @@ const api = {
   formatClock,
   seekTarget,
   selectRetake,
+  moveBefore,
+  mergeOrder,
 };
 
 if (typeof module !== 'undefined') module.exports = api;

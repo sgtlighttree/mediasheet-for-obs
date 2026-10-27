@@ -371,6 +371,9 @@
       border-radius: 50%;
       background: var(--pl-color);
     }
+    /* A thumbnail must not start its own image drag: the tile or clip is what gets dragged */
+    .tile img, .clip-tile img { -webkit-user-drag: none; pointer-events: none; }
+    .tile.drop-target { outline: 2px dashed var(--ms-primary-lighter); outline-offset: 2px; }
     .tile.pl.tally-pgm .tile-label::before { background: #FF4D6A; }
     .tile.pl .tile-label::after { content: attr(data-sub); float: right; font-size: 10px; color: var(--ms-text-muted); padding-top: 3px; }
     .btn-collapse {
@@ -903,6 +906,9 @@
 
     // ===== OBS-side Store =====
     // Lives in OBS persistent data so the OBS dock and any browser tab agree.
+    // What is being dragged right now: { kind: 'scene' | 'clip', id, scene? }
+    MS.drag = null;
+
     MS.store = (() => {
       const REALM = 'OBS_WEBSOCKET_DATA_REALM_GLOBAL';
       const SLOT = 'mediasheet';
@@ -917,6 +923,9 @@
           unmanaged: Array.isArray(v?.unmanaged) ? v.unmanaged : [],
           // Scenes whose box is folded away; everything is open by default
           collapsed: Array.isArray(v?.collapsed) ? v.collapsed : [],
+          // Display order, kept here because OBS cannot reorder scenes and its item order is the layer order
+          sceneOrder: Array.isArray(v?.sceneOrder) ? v.sceneOrder : [],
+          clipOrder: v?.clipOrder && typeof v.clipOrder === 'object' ? v.clipOrder : {},
           subgrid: v?.subgrid && typeof v.subgrid === 'object' ? v.subgrid : {},
           streamOnly: Array.isArray(v?.streamOnly) ? v.streamOnly : [],
           expectedDevice: typeof v?.expectedDevice === 'string' && v.expectedDevice
@@ -1880,6 +1889,31 @@
           }
         });
 
+        // Drag to reorder (order is saved in MediaSheet; a playlist's box travels with its tile)
+        tile.draggable = true;
+        // Sliders and buttons inside a tile must keep their own drags
+        tile.addEventListener('pointerdown', (e) => { tile.draggable = !e.target.closest('input, select, textarea'); });
+        tile.addEventListener('dragstart', (e) => {
+          MS.drag = { kind: 'scene', id: tile.dataset.scene };
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', tile.dataset.scene);
+        });
+        tile.addEventListener('dragover', (e) => {
+          if (MS.drag?.kind !== 'scene' || MS.drag.id === tile.dataset.scene) return;
+          e.preventDefault();
+          tile.classList.add('drop-target');
+        });
+        tile.addEventListener('dragleave', () => tile.classList.remove('drop-target'));
+        tile.addEventListener('drop', (e) => {
+          tile.classList.remove('drop-target');
+          if (MS.drag?.kind !== 'scene') return;
+          e.preventDefault();
+          const from = MS.drag.id;
+          MS.drag = null;
+          MS.grid.moveScene(from, tile.dataset.scene);
+        });
+        tile.addEventListener('dragend', () => { MS.drag = null; document.querySelectorAll('.drop-target').forEach((el) => el.classList.remove('drop-target')); });
+
         // Right-click → context menu (media tiles only)
         if (isMedia) {
           tile.addEventListener('contextmenu', (e) => {
@@ -1928,6 +1962,25 @@
         }
         pgmLabel.textContent = currentPgm || '—';
         pvwLabel.textContent = currentPvw || '—';
+      }
+
+      // Saved order first, scenes it has not seen yet after it (in OBS order); a playlist's box follows its tile
+      function applyOrder() {
+        const order = window.MSPlaylist.mergeOrder(MS.store.get().sceneOrder, [...tiles.keys()]);
+        const boxes = new Map([...container.querySelectorAll('.subgrid-row')].map((r) => [r.dataset.scene, r]));
+        for (const name of order) {
+          container.appendChild(tiles.get(name).el);
+          const row = boxes.get(name);
+          if (row) container.appendChild(row);
+        }
+      }
+
+      async function moveScene(from, to) {
+        const names = [...tiles.keys()];
+        const next = window.MSPlaylist.moveBefore(window.MSPlaylist.mergeOrder(MS.store.get().sceneOrder, names), from, to);
+        await MS.store.update((d) => ({ ...d, sceneOrder: next }));
+        applyOrder();
+        logEvent(`Moved scene: ${from}`);
       }
 
       async function rebuild() {
@@ -1995,6 +2048,7 @@
           updateTally();
           startPolling();
           if (MS.subgrid) MS.subgrid.renderAll();
+          applyOrder();
           logEvent('Grid rebuilt');
         } catch (err) {
           console.error('Failed to rebuild grid:', err);
@@ -2070,6 +2124,8 @@
 
       return {
         rebuild,
+        applyOrder,
+        moveScene,
         tiles,
         getTile: (name) => tiles.get(name),
         get currentPgm() { return currentPgm; },
@@ -2122,6 +2178,8 @@
               managed: d.managed.map((n) => (n === oldSceneName ? sceneName : n)),
               unmanaged: d.unmanaged.map((n) => (n === oldSceneName ? sceneName : n)),
               collapsed: d.collapsed.map((n) => (n === oldSceneName ? sceneName : n)),
+              sceneOrder: d.sceneOrder.map((n) => (n === oldSceneName ? sceneName : n)),
+              clipOrder: Object.fromEntries(Object.entries(d.clipOrder).map(([k, v]) => [k === oldSceneName ? sceneName : k, v])),
               subgrid,
             };
           });
