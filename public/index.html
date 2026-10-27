@@ -2398,6 +2398,30 @@
           el.appendChild(route);
         }
 
+        // Drag to reorder within this playlist (saved in MediaSheet)
+        el.draggable = true;
+        el.addEventListener('pointerdown', (e) => { el.draggable = !e.target.closest('select, input'); });
+        el.addEventListener('dragstart', (e) => {
+          MS.drag = { kind: 'clip', scene: sceneName, id: item.sceneItemId };
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', String(item.sceneItemId));
+        });
+        el.addEventListener('dragover', (e) => {
+          if (MS.drag?.kind !== 'clip' || MS.drag.scene !== sceneName || MS.drag.id === item.sceneItemId) return;
+          e.preventDefault();
+          el.classList.add('drop-target');
+        });
+        el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
+        el.addEventListener('drop', (e) => {
+          el.classList.remove('drop-target');
+          if (MS.drag?.kind !== 'clip' || MS.drag.scene !== sceneName) return;
+          e.preventDefault();
+          const from = MS.drag.id;
+          MS.drag = null;
+          moveClip(sceneName, from, item.sceneItemId).catch((err) => console.error('Clip move failed:', err));
+        });
+        el.addEventListener('dragend', () => { MS.drag = null; document.querySelectorAll('.drop-target').forEach((x) => x.classList.remove('drop-target')); });
+
         const c = { el, badge, fill, thumb, restart, route, silent, item, active: false };
         return c;
       }
@@ -2530,7 +2554,33 @@
           const c = clips.get(key(sceneName, item.sceneItemId));
           if (c) { c.item = item; applyState(sceneName, c); }
         }
+        applyClipOrder(sceneName);
         return true;
+      }
+
+      function clipIds(scan) {
+        return displayedItems(scan).map((i) => i.sceneItemId).sort((a, b) => a - b);
+      }
+
+      // Saved order first, clips it has not seen yet after it
+      function applyClipOrder(sceneName) {
+        const row = rows.get(sceneName);
+        const scan = MS.playlists.getScan(sceneName);
+        if (!row || !scan) return;
+        const order = window.MSPlaylist.mergeOrder(MS.store.get().clipOrder[sceneName], clipIds(scan));
+        const add = row.querySelector('.clip-add');
+        for (const id of order) {
+          const c = clips.get(key(sceneName, id));
+          if (c) row.insertBefore(c.el, add);
+        }
+      }
+
+      async function moveClip(sceneName, from, to) {
+        const scan = MS.playlists.getScan(sceneName);
+        if (!scan) return;
+        const next = window.MSPlaylist.moveBefore(window.MSPlaylist.mergeOrder(MS.store.get().clipOrder[sceneName], clipIds(scan)), from, to);
+        await MS.store.update((d) => ({ ...d, clipOrder: { ...d.clipOrder, [sceneName]: next } }));
+        applyClipOrder(sceneName);
       }
 
       function render(sceneName) {
@@ -2585,9 +2635,11 @@
         }
         row.appendChild(head);
 
-        const list = (scan.detection.auto ? scan.detection.clips : scan.items)
+        const base = (scan.detection.auto ? scan.detection.clips : scan.items)
           .slice()
           .sort((a, b) => a.sceneItemId - b.sceneItemId);
+        const list = window.MSPlaylist.mergeOrder(MS.store.get().clipOrder[sceneName], base.map((i) => i.sceneItemId))
+          .map((id) => base.find((i) => i.sceneItemId === id));
         for (const item of list) {
           const c = buildClip(sceneName, item);
           clips.set(key(sceneName, item.sceneItemId), c);
