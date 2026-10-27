@@ -178,6 +178,39 @@
     .mu-warn { flex: 1; color: #E8B93A; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .music-strip.off > :not(.mu-tag):not(.mu-warn) { display: none; }
 
+    /* === Playlist options popover + AUTO badge === */
+    .auto-badge {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      z-index: 3;
+      padding: 1px 6px;
+      border-radius: var(--ms-radius-sm);
+      background: #1A7F25;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      pointer-events: none;
+    }
+    .subgrid-head .auto-badge { position: static; align-self: center; margin-right: 8px; }
+    .pl-menu {
+      position: fixed;
+      z-index: 60;
+      width: 280px;
+      padding: 10px 12px;
+      background: var(--ms-bg-raised, #1f2430);
+      border: 1px solid var(--ms-border);
+      border-radius: var(--ms-radius-lg);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      font-size: 12px;
+    }
+    .pl-menu-title { font-weight: 700; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pl-menu label { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+    .pl-menu select { margin-left: auto; background: var(--ms-bg-base); color: inherit; border: 1px solid var(--ms-border); border-radius: var(--ms-radius-sm); height: 24px; }
+    .pl-menu .pl-note { margin: 8px 0 0; color: var(--ms-text-muted); line-height: 1.35; }
+    .pl-menu .pl-msg { margin: 8px 0 0; color: #E8B93A; line-height: 1.35; }
+
     .btn-primary {
       background: var(--ms-primary);
       border-color: var(--ms-primary-dark);
@@ -1216,6 +1249,7 @@
       MS.audioFade.recover().catch(() => {});
       MS.liveTransport.refresh().catch(() => {});
       MS.music.refresh().catch((err) => console.error('Music init failed:', err));
+      MS.autoplay.start();
     }
 
     function onDisconnected() {
@@ -1226,6 +1260,7 @@
       document.getElementById('btn-stinger').disabled = true;
       MS.liveTransport.stop();
       MS.music.stop();
+      MS.autoplay.stop();
     }
 
     MS.connection.onConnect = onConnected;
@@ -3012,9 +3047,19 @@
             });
             tile.el.appendChild(chev); // not the thumbnail: its picture is replaced when a clip thumbnail loads
           }
+          if (scan.detection.kind === 'video' && !tile.el.dataset.plMenu) {
+            tile.el.dataset.plMenu = '1';
+            tile.el.addEventListener('contextmenu', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              MS.playlistMenu.open(sceneName, { x: e.clientX, y: e.clientY });
+            });
+          }
+          paintAuto(sceneName);
           return;
         }
         chev?.remove();
+        tile.el.querySelector('.auto-badge')?.remove();
         if (!eligible) { btn?.remove(); return; }
         if (!btn) {
           btn = document.createElement('button');
@@ -3029,6 +3074,25 @@
           tile.el.querySelector('.tile-thumbnail').appendChild(btn);
         }
         btn.classList.toggle('on', showing(sceneName));
+      }
+
+      // AUTO badge on the tile and in the box header while autoplay is armed: set and forget needs the state visible
+      function paintAuto(sceneName) {
+        const on = !!MS.store.get().playlistOptions[sceneName]?.autoplay;
+        const tile = MS.grid.getTile(sceneName);
+        if (tile) {
+          let badge = tile.el.querySelector(':scope > .auto-badge');
+          if (on && !badge) {
+            badge = document.createElement('span');
+            badge.className = 'auto-badge';
+            badge.textContent = 'AUTO';
+            badge.title = 'Autoplay is on for this playlist';
+            tile.el.appendChild(badge);
+          }
+          if (!on) badge?.remove();
+        }
+        const head = rows.get(sceneName)?.querySelector('.head-auto');
+        if (head) head.hidden = !on;
       }
 
       function displayedItems(scan) {
@@ -3098,6 +3162,19 @@
         title.className = 'subgrid-title';
         title.textContent = `${sceneName} — ${scan.detection.auto ? scan.detection.kind + ' playlist' : 'sources'}`;
         head.appendChild(title);
+        if (scan.detection.auto && scan.detection.kind === 'video') {
+          const autoTag = document.createElement('span');
+          autoTag.className = 'auto-badge head-auto';
+          autoTag.textContent = 'AUTO';
+          autoTag.hidden = !MS.store.get().playlistOptions[sceneName]?.autoplay;
+          head.appendChild(autoTag);
+          const options = document.createElement('button');
+          options.className = 'btn-manage';
+          options.textContent = 'Options';
+          options.title = 'Autoplay, loop and the transition between clips';
+          options.addEventListener('click', (e) => { e.stopPropagation(); MS.playlistMenu.open(sceneName, options); });
+          head.appendChild(options);
+        }
         if (scan.detection.auto) {
           const manage = document.createElement('button');
           manage.className = 'btn-manage';
@@ -3230,7 +3307,7 @@
         picker.click();
       }
 
-      return { render, renderAll, refreshTally, clips, showing, importInto, expand, paintStrip };
+      return { render, renderAll, refreshTally, clips, showing, importInto, expand, paintStrip, paintAuto };
     })();
 
     // ===== In-page Confirm =====
@@ -3445,6 +3522,8 @@
       // Like switching scenes: after a take the clip that just left Program is cued in Preview, so CUT swaps them back.
       const swapTimers = new Map();
       function scheduleSwapCue(sceneName, clip) {
+        // An armed playlist cues its own next clip: a swap cue would collide with it
+        if (MS.autoplay?.isArmed(sceneName)) return;
         clearTimeout(swapTimers.get(sceneName));
         swapTimers.set(sceneName, setTimeout(() => {
           swapCue(sceneName, clip).catch((err) => console.error('Swap cue failed:', err));
@@ -3676,6 +3755,275 @@
       }, 1000);
 
       return { setManaged, normalizeInput, normalizeScene, evaluateIdle, onConnect, isManagedPlaylist, renameScene };
+    })();
+
+    // ===== Autoplay =====
+    // Set and forget: an armed video playlist that is on Program plays its clips in the order shown, cueing the next clip a few seconds ahead and taking it with the playlist's transition so the swap lands on the end of the clip.
+    // It runs in this page (OBS cannot chain clips itself), so it stops when the dock closes or reloads or the Mac sleeps. Only one open client runs it: a short lease in OBS's persistent data decides which.
+    MS.autoplay = (() => {
+      const P = window.MSPlaylist;
+      const REALM = 'OBS_WEBSOCKET_DATA_REALM_GLOBAL';
+      const LOCK_SLOT = 'mediasheet_autoplay_lock';
+      const LEASE_STALE_MS = 3000;
+      const TICK_MS = 500;
+      const clientId = Math.random().toString(36).slice(2);
+      // Only OBS's own dock (it exposes window.obsstudio) runs the engine, or a browser tab opened with ?engine. A test browser or a stray tab never takes clips on Program.
+      const allowed = !!window.obsstudio || new URLSearchParams(location.search).has('engine');
+      const states = new Map(); // scene → { timer, dueAt, cuedFor, advancing }
+      let holder = false;
+      let ticking = false;
+      let tickTimer = null;
+      let leaseTimer = null;
+
+      const obs = () => MS.connection.obs;
+      const defaults = { autoplay: false, loop: true, transition: 'fade' };
+      const opts = (scene) => MS.store.get().playlistOptions[scene] ?? defaults;
+      const isArmed = (scene) => !!MS.store.get().playlistOptions[scene]?.autoplay;
+      const armedScenes = () => Object.entries(MS.store.get().playlistOptions).filter(([, o]) => o.autoplay).map(([s]) => s);
+
+      function waitForEvent(name, timeoutMs) {
+        return new Promise((resolve) => {
+          const done = () => { clearTimeout(timer); obs().off(name, done); resolve(); };
+          const timer = setTimeout(done, timeoutMs);
+          obs().on(name, done);
+        });
+      }
+
+      async function renewLease() {
+        if (!allowed || !MS.connection.connected || !armedScenes().length) { holder = false; return; }
+        let lock = null;
+        try {
+          lock = (await obs().call('GetPersistentData', { realm: REALM, slotName: LOCK_SLOT })).slotValue;
+        } catch {}
+        const stale = !lock || typeof lock.at !== 'number' || Date.now() - lock.at > LEASE_STALE_MS;
+        if ((lock && lock.id === clientId) || stale) {
+          await obs().call('SetPersistentData', { realm: REALM, slotName: LOCK_SLOT, slotValue: { id: clientId, at: Date.now() } }).catch(() => {});
+          holder = true;
+        } else {
+          holder = false;
+        }
+      }
+
+      function stateFor(scene) {
+        if (!states.has(scene)) states.set(scene, { timer: null, dueAt: 0, cuedFor: null, advancing: false });
+        return states.get(scene);
+      }
+
+      function reset(scene) {
+        const st = states.get(scene);
+        if (!st) return;
+        clearTimeout(st.timer);
+        st.timer = null;
+        st.dueAt = 0;
+        st.cuedFor = null;
+      }
+
+      function effectiveTransition(scene) {
+        const t = opts(scene).transition;
+        return t === 'stinger' && !MS.transitions.stingerName ? 'fade' : t;
+      }
+
+      function takeFn(scene) {
+        const t = effectiveTransition(scene);
+        if (t === 'cut') return () => MS.transitionControl.cut();
+        if (t === 'stinger') return () => MS.transitionControl.stinger();
+        return () => MS.transitionControl.fade();
+      }
+
+      function leadMs(scene) {
+        return P.autoplayLeadMs({
+          transition: effectiveTransition(scene),
+          audioFadeMs: MS.store.get().audioFadeMs,
+          fadeMs: parseInt(document.getElementById('fade-duration').value, 10) || 300,
+          stingerPointMs: MS.transitionControl.stingerPointMs(),
+        });
+      }
+
+      // Cue (if the clip is not cued yet), then take. Returns whether a take happened.
+      async function advance(scene, clip) {
+        const st = stateFor(scene);
+        if (st.advancing || !holder || scene !== MS.grid.currentPgm) return false;
+        st.advancing = true;
+        try {
+          if (st.cuedFor !== clip.sourceName) {
+            if (!(await MS.cue.cueClip(scene, clip, { auto: true }))) return false;
+            st.cuedFor = clip.sourceName;
+          }
+          const ended = waitForEvent('SceneTransitionEnded', 15000);
+          if (!(await takeFn(scene)())) return false;
+          MS.grid.logEvent(`Autoplay: ${scene} → ${clip.sourceName}`);
+          st.cuedFor = null;
+          await ended;
+          await new Promise((r) => setTimeout(r, 1500));
+          return true;
+        } catch (err) {
+          console.error('Autoplay advance failed:', err);
+          return false;
+        } finally {
+          st.advancing = false;
+          reset(scene);
+        }
+      }
+
+      async function tickScene(scene) {
+        const st = stateFor(scene);
+        if (scene !== MS.grid.currentPgm || !MS.manager.isManagedPlaylist(scene)) { reset(scene); return; }
+        if (st.advancing || MS.transitionControl.isPending() || MS.cue.busy) return;
+        const scan = await MS.playlists.scan(scene);
+        if (!scan.detection.auto || scan.detection.kind !== 'video') return;
+        const clips = scan.detection.clips;
+        const ids = P.mergeOrder(MS.store.get().clipOrder[scene], clips.map((c) => c.sceneItemId));
+        const order = ids.map((id) => clips.find((c) => c.sceneItemId === id)).filter(Boolean);
+        const live = [];
+        for (const c of order) {
+          const { videoActive } = await obs().call('GetSourceActive', { sourceName: c.sourceName }).catch(() => ({}));
+          if (!videoActive) continue;
+          const s = await obs().call('GetMediaInputStatus', { inputName: c.sourceName }).catch(() => ({}));
+          live.push({ sourceName: c.sourceName, state: s.mediaState, cursor: s.mediaCursor, duration: s.mediaDuration });
+        }
+        const o = opts(scene);
+        const plan = P.planAutoplay({ order, live, loop: o.loop, leadMs: leadMs(scene) });
+
+        if (plan.act === 'start') {
+          reset(scene);
+          await advance(scene, plan.clip);
+          return;
+        }
+        if (plan.act !== 'advance') { reset(scene); return; }
+
+        if (plan.cueNow && st.cuedFor !== plan.next.sourceName) {
+          if (await MS.cue.cueClip(scene, plan.next, { auto: true })) st.cuedFor = plan.next.sourceName;
+        }
+        const dueAt = Date.now() + plan.takeInMs;
+        if (!st.timer || st.nextFor !== plan.next.sourceName || Math.abs(st.dueAt - dueAt) > 600) {
+          clearTimeout(st.timer);
+          st.nextFor = plan.next.sourceName;
+          st.dueAt = dueAt;
+          st.timer = setTimeout(() => { st.timer = null; advance(scene, plan.next); }, plan.takeInMs);
+        }
+      }
+
+      async function tick() {
+        if (ticking || !holder || !MS.connection.connected) return;
+        ticking = true;
+        try {
+          const armed = armedScenes();
+          for (const scene of armed) await tickScene(scene).catch((err) => console.error('Autoplay tick failed:', err));
+          for (const scene of [...states.keys()]) if (!armed.includes(scene)) reset(scene);
+        } finally {
+          ticking = false;
+        }
+      }
+
+      function start() {
+        if (!allowed || tickTimer) return;
+        renewLease();
+        leaseTimer = setInterval(() => renewLease().catch(() => {}), 1000);
+        tickTimer = setInterval(() => tick().catch(() => {}), TICK_MS);
+      }
+
+      function stop() {
+        clearInterval(tickTimer);
+        clearInterval(leaseTimer);
+        tickTimer = null;
+        leaseTimer = null;
+        holder = false;
+        for (const scene of [...states.keys()]) reset(scene);
+      }
+
+      // Turning it on checks what could make an unattended take unsafe, and asks once if Program might still be the original scene.
+      async function setOptions(scene, patch) {
+        if (patch.autoplay === true) {
+          if ((await MS.cue.sceneDuplication()) !== 'true') {
+            return { ok: false, message: 'Autoplay needs Duplicate Scene on in OBS (Settings > General, Studio Mode section), so cueing never changes what is on Program.' };
+          }
+          if (!MS.manager.isManagedPlaylist(scene)) {
+            return { ok: false, message: 'Switch Managed on for this playlist first.' };
+          }
+          if (scene === MS.grid.currentPgm && !MS.cue.sawTransition()) {
+            const yes = await MS.confirm(`"${scene}" is on Program and no transition has been seen since MediaSheet connected. Autoplay will cue and take its clips by itself.`, 'Turn autoplay on');
+            if (!yes) return { ok: false };
+          }
+        }
+        await MS.store.update((d) => ({ ...d, playlistOptions: { ...d.playlistOptions, [scene]: { ...(d.playlistOptions[scene] ?? defaults), ...patch } } }));
+        MS.subgrid.paintAuto(scene);
+        return { ok: true };
+      }
+
+      return { start, stop, setOptions, opts, isArmed };
+    })();
+
+    // ===== Playlist Options Popover =====
+    MS.playlistMenu = (() => {
+      let menu = null;
+
+      function close() {
+        menu?.remove();
+        menu = null;
+        document.removeEventListener('keydown', onKey, true);
+      }
+      function onKey(e) { if (e.key === 'Escape') close(); }
+
+      function open(sceneName, at) {
+        close();
+        const o = MS.autoplay.opts(sceneName);
+        menu = document.createElement('div');
+        menu.className = 'pl-menu';
+        menu.addEventListener('click', (e) => e.stopPropagation());
+        menu.addEventListener('contextmenu', (e) => e.stopPropagation());
+
+        const title = document.createElement('div');
+        title.className = 'pl-menu-title';
+        title.textContent = sceneName;
+        const msg = document.createElement('p');
+        msg.className = 'pl-msg';
+        msg.hidden = true;
+
+        const row = (labelText, control) => {
+          const l = document.createElement('label');
+          l.append(control, document.createTextNode(labelText));
+          return l;
+        };
+        const check = (checked) => Object.assign(document.createElement('input'), { type: 'checkbox', checked });
+        const autoBox = check(o.autoplay);
+        const loopBox = check(o.loop);
+
+        const sel = document.createElement('select');
+        for (const [v, label] of [['cut', 'Cut'], ['fade', 'Fade'], ['stinger', 'Stinger']]) {
+          const opt = new Option(label, v);
+          if (v === 'stinger' && !MS.transitions.stingerName) { opt.disabled = true; opt.textContent = 'Stinger (none in OBS)'; }
+          sel.append(opt);
+        }
+        sel.value = o.transition;
+        const selLabel = document.createElement('label');
+        selLabel.append(document.createTextNode('Between clips'), sel);
+
+        const apply = async (patch, undo) => {
+          const r = await MS.autoplay.setOptions(sceneName, patch).catch((err) => ({ ok: false, message: err.message }));
+          msg.hidden = !r.message;
+          msg.textContent = r.message ?? '';
+          if (!r.ok) undo?.();
+        };
+        autoBox.addEventListener('change', () => apply({ autoplay: autoBox.checked }, () => { autoBox.checked = !autoBox.checked; }));
+        loopBox.addEventListener('change', () => apply({ loop: loopBox.checked }));
+        sel.addEventListener('change', () => apply({ transition: sel.value }));
+
+        const note = document.createElement('p');
+        note.className = 'pl-note';
+        note.textContent = 'Plays the clips in the order shown, only while this playlist is on Program. Pause the live clip to hold. A clip you cue by hand is replaced at the next advance. It runs in this dock: keep the dock open and the Mac awake.';
+
+        menu.append(title, row('Autoplay (set and forget)', autoBox), row('Loop the playlist', loopBox), selLabel, msg, note);
+        document.body.appendChild(menu);
+        const r = at instanceof Element ? at.getBoundingClientRect() : { left: at.x, bottom: at.y };
+        const w = menu.offsetWidth;
+        const h = menu.offsetHeight;
+        menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+        menu.style.top = Math.max(8, Math.min(r.bottom + 4, window.innerHeight - h - 8)) + 'px';
+        document.addEventListener('keydown', onKey, true);
+      }
+
+      document.addEventListener('click', close);
+      return { open, close };
     })();
 
     // ===== File Import =====
