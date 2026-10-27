@@ -1015,7 +1015,10 @@
       let data = normalize(null);
 
       function normalize(v) {
+        // Keys this version does not know survive: a dock still running older code would otherwise drop them (e.g. musicGain) on its next write
+        const unknown = v && typeof v === 'object' && !Array.isArray(v) ? v : {};
         return {
+          ...unknown,
           // Video playlists are managed unless listed in `unmanaged`; image playlists only when listed in `managed` (their idle reset hides images, which would blank a scene that shows several at once)
           managed: Array.isArray(v?.managed) ? v.managed : [],
           unmanaged: Array.isArray(v?.unmanaged) ? v.unmanaged : [],
@@ -1026,6 +1029,12 @@
           clipOrder: v?.clipOrder && typeof v.clipOrder === 'object' ? v.clipOrder : {},
           subgrid: v?.subgrid && typeof v.subgrid === 'object' ? v.subgrid : {},
           streamOnly: Array.isArray(v?.streamOnly) ? v.streamOnly : [],
+          // Per playlist scene: autoplay (set and forget), loop the playlist, and the transition between clips
+          playlistOptions: Object.fromEntries(Object.entries(v?.playlistOptions && typeof v.playlistOptions === 'object' ? v.playlistOptions : {}).map(([scene, o]) => [scene, {
+            autoplay: o?.autoplay === true,
+            loop: o?.loop !== false,
+            transition: ['cut', 'fade', 'stinger'].includes(o?.transition) ? o.transition : 'fade',
+          }])),
           // Music volume per track file (a multiplier), so each song comes up at its own level
           musicGain: v?.musicGain && typeof v.musicGain === 'object'
             ? Object.fromEntries(Object.entries(v.musicGain).filter(([, n]) => typeof n === 'number' && n >= 0 && n <= 20))
@@ -2621,6 +2630,7 @@
               collapsed: d.collapsed.map((n) => (n === oldSceneName ? sceneName : n)),
               sceneOrder: d.sceneOrder.map((n) => (n === oldSceneName ? sceneName : n)),
               clipOrder: Object.fromEntries(Object.entries(d.clipOrder).map(([k, v]) => [k === oldSceneName ? sceneName : k, v])),
+              playlistOptions: Object.fromEntries(Object.entries(d.playlistOptions).map(([k, v]) => [k === oldSceneName ? sceneName : k, v])),
               subgrid,
             };
           });
