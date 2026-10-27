@@ -99,10 +99,12 @@ function planLeave({ sourceName, kind, active }) {
 }
 
 // restart_on_activate is off for managed clips so MediaSheet restarts the clip itself, once, when it goes live. Resuming a cued clip with PLAY held the old picture for ~1 s while the audio ran (measured), RESTART does not.
-function planActivate({ sourceName, kind, muted, monitorType, streamOnlyChosen, monitorSwitchSafe, mediaState }) {
+function planActivate({ sourceName, kind, muted, monitorType, streamOnlyChosen, monitorSwitchSafe, mediaState, prerolled }) {
   if (kind !== 'video') return [];
   const reqs = [];
-  if (mediaState) {
+  // A clip MediaSheet already restarted in Preview is playing when it goes live; restarting it again would drop its frame (~2 black frames).
+  const alreadyPlaying = prerolled && mediaState === 'OBS_MEDIA_STATE_PLAYING';
+  if (mediaState && !alreadyPlaying) {
     reqs.push({ request: 'TriggerMediaInputAction', data: { inputName: sourceName, mediaAction: RESTART_ACTION } });
   }
   if (muted) reqs.push({ request: 'SetInputMute', data: { inputName: sourceName, inputMuted: false } });

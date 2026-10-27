@@ -1224,7 +1224,7 @@
             enabledInPreview: enabledInPreview.has(sourceName),
           };
         }));
-        return P.selectFadeTargets(candidates);
+        return { ...P.selectFadeTargets(candidates), candidates };
       }
 
       // Decide who fades, remember their real levels, and silence the incoming clips. Never blocks a take: any failure means no fades.
@@ -1246,7 +1246,7 @@
                 ramps.set(e.sourceName, ++rampSeq);
                 return setMul(e.sourceName, 0);
               }));
-              return { ...targets, ms };
+              return { outgoing: targets.outgoing, incoming: targets.incoming, ms };
             })(),
             sleep(PREPARE_TIMEOUT_MS).then(() => { abandoned = true; return null; }),
           ]);
@@ -1425,6 +1425,55 @@
       return { refresh, stop };
     })();
 
+    // ===== Pre-roll =====
+    // OBS's restart drops the current frame and shows ~2 black frames. Doing it while the incoming clip is still only in Preview keeps the blank off Program: the clip is restarted, given a moment to draw, and goes live already playing.
+    MS.preroll = (() => {
+      const STARTED_TIMEOUT_MS = 800;
+      const SETTLE_MS = 150;
+      const WINDOW_MS = 3000;
+      const recent = new Map(); // inputName → when it was pre-rolled
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      async function restartAndWait(inputName) {
+        const obs = MS.connection.obs;
+        let handler;
+        const started = new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(false), STARTED_TIMEOUT_MS);
+          handler = (d) => { if (d.inputName === inputName) { clearTimeout(timer); resolve(true); } };
+          obs.on('MediaInputPlaybackStarted', handler);
+        });
+        try {
+          await obs.call('TriggerMediaInputAction', { inputName, mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART' });
+          return await started;
+        } finally {
+          obs.off('MediaInputPlaybackStarted', handler);
+        }
+      }
+
+      // Never blocks a take: any failure means the clip is restarted at the take instead (with the black frames).
+      async function run() {
+        try {
+          const pvw = MS.grid.currentPvw;
+          if (!MS.connection.connected || !pvw || !MS.manager.isManagedPlaylist(pvw)) return [];
+          const { candidates } = await MS.audioFade.gather();
+          const targets = candidates.filter((c) => !c.live && c.enabledInPreview);
+          if (!targets.length) return [];
+          await Promise.all(targets.map(async (c) => {
+            // Silent while it plays unseen; the activation handler unmutes it when it goes live
+            await MS.connection.obs.call('SetInputMute', { inputName: c.sourceName, inputMuted: true });
+            if (await restartAndWait(c.sourceName)) recent.set(c.sourceName, Date.now());
+          }));
+          await sleep(SETTLE_MS);
+          return targets.map((c) => c.sourceName);
+        } catch (err) {
+          console.error('Pre-roll failed:', err);
+          return [];
+        }
+      }
+
+      return { run, was: (inputName) => Date.now() - (recent.get(inputName) ?? -Infinity) < WINDOW_MS };
+    })();
+
     // ===== Transition Control =====
     MS.transitionControl = (() => {
       const btnCut = document.getElementById('btn-cut');
@@ -1449,8 +1498,10 @@
           if (plan) {
             MS.grid.logEvent(`Audio fade: out ${plan.outgoing.length}, in ${plan.incoming.length}`);
             MS.audioFade.setNextInMs(plan.ms);
-            await MS.audioFade.fadeOut(plan);
           }
+          // The incoming clip is restarted in Preview while the outgoing audio fades, so a Cut adds little or no delay
+          const [rolled] = await Promise.all([MS.preroll.run(), plan ? MS.audioFade.fadeOut(plan) : null]);
+          if (rolled.length) MS.grid.logEvent(`Pre-rolled ${rolled.length} clip(s)`);
           if (MS.transitions.cutName) {
             await MS.connection.obs.call('SetCurrentSceneTransition', {
               transitionName: MS.transitions.cutName,
@@ -1472,6 +1523,8 @@
         durationMs = durationMs || parseInt(fadeDurationInput.value, 10) || 300;
         try {
           const plan = await MS.audioFade.prepare();
+          const rolled = await MS.preroll.run();
+          if (rolled.length) MS.grid.logEvent(`Pre-rolled ${rolled.length} clip(s)`);
           if (MS.transitions.fadeName) {
             await MS.connection.obs.call('SetCurrentSceneTransition', {
               transitionName: MS.transitions.fadeName,
@@ -2588,6 +2641,7 @@
           kind: hit.clip.kind,
           muted: inputMuted,
           mediaState: status.mediaState,
+          prerolled: MS.preroll.was(inputName),
           monitorType,
           streamOnlyChosen: MS.cue.streamOnlyChosen.has(inputName),
           monitorSwitchSafe: true,
