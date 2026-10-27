@@ -1984,12 +1984,13 @@
         btnStinger.classList.toggle('busy', on);
       }
 
+      // cut, fade and stinger return whether the transition was started (the autoplay engine checks)
       async function cut() {
-        if (!MS.connection.connected || pending) return;
+        if (!MS.connection.connected || pending) return false;
         setPending(true);
         lastTransitionType = 'cut';
         try {
-          if (await MS.audioFade.retake()) return;
+          if (await MS.audioFade.retake()) return true;
           const plan = await MS.audioFade.prepare();
           if (plan) {
             MS.grid.logEvent(`Audio fade: out ${plan.outgoing.length}, in ${plan.incoming.length}`);
@@ -2008,20 +2009,22 @@
           }
           await MS.connection.obs.call('TriggerStudioModeTransition');
           await restartOnTake();
+          return true;
         } catch (err) {
           console.error('Cut transition failed:', err);
+          return false;
         } finally {
           setPending(false);
         }
       }
 
       async function fade(durationMs) {
-        if (!MS.connection.connected || pending) return;
+        if (!MS.connection.connected || pending) return false;
         setPending(true);
         lastTransitionType = 'fade';
         durationMs = durationMs || parseInt(fadeDurationInput.value, 10) || 300;
         try {
-          if (await MS.audioFade.retake()) return;
+          if (await MS.audioFade.retake()) return true;
           const plan = await MS.audioFade.prepare();
           const rolled = await MS.preroll.run();
           if (rolled.length) MS.grid.logEvent(`Pre-rolled ${rolled.length} clip(s)`);
@@ -2041,8 +2044,10 @@
           }
           await MS.connection.obs.call('TriggerStudioModeTransition');
           await restartOnTake();
+          return true;
         } catch (err) {
           console.error('Fade transition failed:', err);
+          return false;
         } finally {
           setPending(false);
         }
@@ -2077,18 +2082,21 @@
         throw new Error('OBS did not switch to the stinger');
       }
 
+      let lastStingerPointMs = 1000; // what the engine uses to start a stinger early enough
+
       async function stinger() {
-        if (!MS.connection.connected || pending || !MS.transitions.stingerName) return;
+        if (!MS.connection.connected || pending || !MS.transitions.stingerName) return false;
         setPending(true);
         lastTransitionType = 'stinger';
         try {
-          if (await MS.audioFade.retake()) return;
+          if (await MS.audioFade.retake()) return true;
           const obs = MS.connection.obs;
           const pointMs = await readStinger();
           if (pointMs === null) {
             MS.grid.logEvent('Stinger has no video file: pick one in OBS (Scene Transitions, Stinger, Properties)');
-            return;
+            return false;
           }
+          lastStingerPointMs = pointMs;
           const { candidates } = await MS.audioFade.gather();
           const incoming = candidates.filter((c) => !c.live && c.enabledInPreview).map((c) => c.sourceName);
           const plan = await MS.audioFade.prepare();
@@ -2111,9 +2119,11 @@
             sleep(pointMs).then(() => restartOnTake()),
           ]);
           await videoEnded;
+          return true;
         } catch (err) {
           console.error('Stinger transition failed:', err);
           MS.grid.logEvent(`Stinger failed: ${err.message}`);
+          return false;
         } finally {
           stingerHoldUntil = 0;
           MS.audioFade.holdFadeUpUntil(0);
@@ -2189,7 +2199,15 @@
 
       updateButtonHighlight();
 
-      return { cut, fade, stinger, take, stingerHolding: () => Date.now() < stingerHoldUntil };
+      return {
+        cut,
+        fade,
+        stinger,
+        take,
+        stingerHolding: () => Date.now() < stingerHoldUntil,
+        isPending: () => pending,
+        stingerPointMs: () => lastStingerPointMs,
+      };
     })();
 
     // ===== Scene Grid =====
@@ -3292,9 +3310,11 @@
         if (force || !videoActive) await obs.call('TriggerMediaInputAction', { inputName, mediaAction: PAUSE });
       }
 
-      async function cueClip(sceneName, clipItem) {
-        if (busy || !MS.connection.connected) return;
+      // Returns whether the cue was done. `auto` (autoplay) skips the per-cue prompt: arming already asked once.
+      async function cueClip(sceneName, clipItem, { auto = false } = {}) {
+        if (busy || !MS.connection.connected) return false;
         setBusy(true);
+        let done = false;
         const tileEl = MS.subgrid.clips.get(`${sceneName}|${clipItem.sceneItemId}`)?.el;
         tileEl?.classList.add('cueing');
         const obs = MS.connection.obs;
@@ -3307,7 +3327,7 @@
           const active = new Set(scan.items.filter((_, i) => activeFlags[i]).map((i) => i.sourceName));
 
           const { currentProgramSceneName, currentPreviewSceneName } = await obs.call('GetSceneList');
-          if (currentProgramSceneName === sceneName) {
+          if (currentProgramSceneName === sceneName && !auto) {
             const dup = await sceneDuplication();
             if (dup !== 'true' || !sawTransitionEnd) {
               const why = dup !== 'true'
@@ -3316,7 +3336,7 @@
               const ok = await MS.confirm(
                 `"${sceneName}" is on Program and ${why}. Cueing could change what is live right now.`,
                 'Cue anyway');
-              if (!ok) return;
+              if (!ok) return false;
             }
           }
 
@@ -3338,6 +3358,7 @@
           if (item.kind === 'video' && !active.has(item.sourceName)) await primeFirstFrame(item.sourceName);
 
           MS.grid.logEvent(`Cued: ${item.sourceName}`);
+          done = true;
         } catch (err) {
           console.error('Cue failed:', err);
           MS.grid.logEvent(`Cue failed: ${err.message}`);
@@ -3345,6 +3366,7 @@
           tileEl?.classList.remove('cueing');
           setBusy(false);
         }
+        return done;
       }
 
       async function restartLive(item) {
@@ -3359,6 +3381,7 @@
 
       return {
         cueClip,
+        sceneDuplication,
         parkClip: (inputName) => primeFirstFrame(inputName, { force: true }),
         restartLive,
         streamOnlyChosen,

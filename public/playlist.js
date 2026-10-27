@@ -124,6 +124,38 @@ function shouldIdleReset({ managed, isProgram, isPreview, enabledClipCount, trig
   return (!isProgram && !isPreview) || enabledClipCount > 1;
 }
 
+// Autoplay: what the engine should do for one video playlist that is on Program.
+// order = clips in display order [{ sourceName }]; live = clips live on Program [{ sourceName, state, cursor, duration }]; leadMs = how long before a clip's end the take must start so the swap lands on the end.
+const AUTOPLAY_CUE_AHEAD_MS = 5000;
+const AUTOPLAY_MIN_ON_AIR_MS = 3000;
+function planAutoplay({ order, live, loop, leadMs }) {
+  if (!order.length) return { act: 'idle' };
+  if (!live.length) return { act: 'start', clip: order[0] };
+  const cur = live.find((c) => c.state === 'OBS_MEDIA_STATE_PLAYING') ?? live[live.length - 1];
+  // Paused is a hold: the operator paused the clip on purpose (or the startup park did)
+  if (cur.state === 'OBS_MEDIA_STATE_PAUSED') return { act: 'idle', reason: 'paused' };
+  const idx = order.findIndex((c) => c.sourceName === cur.sourceName);
+  let next;
+  if (idx === -1) next = order[0]; // the operator took a clip that is not in the order: start the list
+  else if (idx + 1 < order.length) next = order[idx + 1];
+  else next = loop ? order[0] : null;
+  if (cur.state === 'OBS_MEDIA_STATE_ENDED' || cur.state === 'OBS_MEDIA_STATE_STOPPED') {
+    return next ? { act: 'advance', next, takeInMs: 0, cueNow: true } : { act: 'finished' };
+  }
+  if (cur.state !== 'OBS_MEDIA_STATE_PLAYING' || !(cur.duration > 0)) return { act: 'idle', reason: 'waiting' };
+  if (!next) return { act: 'finished' };
+  const remaining = Math.max(0, cur.duration - (cur.cursor ?? 0));
+  const takeInMs = Math.max(0, remaining - leadMs, AUTOPLAY_MIN_ON_AIR_MS - (cur.cursor ?? 0));
+  return { act: 'advance', next, takeInMs, cueNow: takeInMs <= AUTOPLAY_CUE_AHEAD_MS };
+}
+
+// How long before a clip's end each transition has to start, counting what the take does first.
+function autoplayLeadMs({ transition, audioFadeMs, fadeMs, stingerPointMs }) {
+  if (transition === 'cut') return audioFadeMs;
+  if (transition === 'stinger') return stingerPointMs + 250;
+  return fadeMs + 250;
+}
+
 // The cut point of OBS's stinger transition (when the picture swaps), in ms from the start. null = the transition has no video file yet.
 function stingerPointMs(settings, fps) {
   if (!settings || !settings.path) return null;
@@ -286,6 +318,9 @@ const api = {
   selectStartupParks,
   stingerPointMs,
   planStingerTiming,
+  planAutoplay,
+  autoplayLeadMs,
+  AUTOPLAY_CUE_AHEAD_MS,
   shouldEvaluatePileup,
   rampValue,
   fadeLevel,
