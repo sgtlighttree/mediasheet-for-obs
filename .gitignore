@@ -2,3 +2,8 @@
 node_modules/
 cache/
 test_clips/
+
+# secrets
+.env
+.env.*
+!.env.example
